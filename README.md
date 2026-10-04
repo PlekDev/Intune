@@ -13,7 +13,7 @@ A fully embedded pipeline (no PC, no g.tec dongle) that monitors an operator's E
 ## Architecture
 
 ```
-Unicorn Hybrid Black ──BT Classic SPP──> classic ESP32 ──UART 921600──> ESP32-S3 ──TCP/Wi-Fi──> arm ESP32
+Unicorn Hybrid Black ──BT Classic SPP──> classic ESP32 ──UART 921600──> ESP32-S3 ──  UART  ──────> arm
    8 EEG ch @ 250 Hz                     receives, validates,           autoencoder,              applies the reaction
                                          filters with CLEEGN            graded alerts             (slow down, pause, stop)
 ```
