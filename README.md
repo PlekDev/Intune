@@ -1,6 +1,6 @@
 # INTUNE
 
-**IN**tegrated **N**eural **T**elemetry for **U**nsafe-state **N**otification and **E**mergency response
+**I**ntegrated **N**eural **T**elemetry for **U**nsafe-state **N**otification and **E**mergency response
 
 *Keeping robots in tune with the people who operate them.*
 
