@@ -1,139 +1,126 @@
-# /// script
-# requires-python = ">=3.11,<3.14"
-# dependencies = ["torch", "numpy", "pandas"]
-#
-# [tool.uv.sources]
-# torch = { index = "pytorch-cpu" }
-#
-# [[tool.uv.index]]
-# name = "pytorch-cpu"
-# url = "https://download.pytorch.org/whl/cpu"
-# explicit = true
-# ///
-"""Entrena el autoencoder del Detector (C2) SOLO con datos normales.
+"""Entrena el ErrP-AE (Keras) SOLO con epochs de acciones correctas.
 
-    uv run ml/autoencoder/training/train.py [--normal ml/data/normal_mock.csv]
+    uv run --project ml/autoencoder ml/autoencoder/training/train.py --data <epochs.npz>
 
-CSV esperado (lo genera C4 en ml/data/): una fila por ventana, 40 columnas de
-features. Si existen las columnas <canal>_<banda> (Fz_delta ... PO8_gamma) se
-usan en ese orden; si no, se toman las columnas numéricas que no sean de
-metadatos y deben ser exactamente 40.
+Split cronológico 70/15/15 sobre todos los epochs (errp_pipeline.chrono_split):
+  train: correctos aceptados por el gate, con augmentation nueva cada época
+         (jitter ±20 ms, ganancia por canal ±10 %, ruido gaussiano);
+  val:   correctos sin augmentation, para early stopping;
+  test:  correctos + errores, reservado para evaluate.py (umbrales y AUC).
+Normalización z-score por canal con mean/std de los correctos de train.
 
-Split train/val cronológico (último 20 % = val): las ventanas se traslapan y un
-split aleatorio filtraría muestras casi idénticas a validación.
-
-Guarda en el checkpoint: pesos del mejor epoch (val loss), mean/std de train y
-el orden de features. evaluate.py lo usa para generar config.json.
+--arch auto entrena conv y dense y se queda con el de menor MSE en val
+(si el conv sobreajusta, gana el dense). Guarda models/errp_ae.keras y
+models/errp_ae_meta.json.
 """
 import argparse
+import json
 import sys
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
-import torch
-from torch import nn
 
-ML_DIR = Path(__file__).resolve().parents[2]  # .../ml
-REPO_ROOT = ML_DIR.parent
-sys.path.insert(0, str(ML_DIR / "autoencoder"))
-from models.autoencoder import FEATURE_NAMES, N_FEATURES, Autoencoder  # noqa: E402
+AE_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(AE_DIR))
+import errp_pipeline as ep  # noqa: E402
 
-DEFAULT_NORMAL = ML_DIR / "data" / "normal_mock.csv"
-DEFAULT_MODEL = ML_DIR / "autoencoder" / "models" / "autoencoder_best.pt"
-META_COLUMNS = {"t", "time", "timestamp", "counter", "window", "label", "anomaly",
-                "is_anomaly", "event", "session", "subject", "split"}
-VAL_FRACTION = 0.2
+import keras  # noqa: E402
+from models.errp_ae import BUILDERS  # noqa: E402
+
+DEFAULT_DATA = AE_DIR.parent / "data" / "epochs.npz"
+MODEL_PATH = AE_DIR / "models" / "errp_ae.keras"
+META_PATH = AE_DIR / "models" / "errp_ae_meta.json"
 
 
-def load_features(path: Path) -> tuple[np.ndarray, list[str], pd.DataFrame]:
-    """Devuelve (X float32 [n, 40], nombres de columnas, DataFrame original)."""
-    df = pd.read_csv(path)
-    if all(name in df.columns for name in FEATURE_NAMES):
-        cols = FEATURE_NAMES
-    else:
-        cols = [c for c in df.select_dtypes("number").columns if c.lower() not in META_COLUMNS]
-        if len(cols) != N_FEATURES:
-            raise SystemExit(f"{path}: se esperaban {N_FEATURES} columnas de features, hay {len(cols)}: {cols}")
-    x = df[cols].to_numpy(dtype=np.float32)
-    if not np.isfinite(x).all():
-        raise SystemExit(f"{path}: hay NaN/inf en las features")
-    return x, list(cols), df
+class AugmentedEpochs(keras.utils.PyDataset):
+    """Augmentation nueva en cada época; entrada = objetivo (autoencoder)."""
+
+    def __init__(self, x_raw, mean, std, batch, seed, noise_std):
+        super().__init__()
+        self.x_raw, self.mean, self.std = x_raw, mean, std
+        self.batch, self.noise_std = batch, noise_std
+        self.rng = np.random.default_rng(seed)
+        self.on_epoch_end()
+
+    def on_epoch_end(self):
+        self.order = self.rng.permutation(len(self.x_raw))
+
+    def __len__(self):
+        return int(np.ceil(len(self.x_raw) / self.batch))
+
+    def __getitem__(self, i):
+        idx = self.order[i * self.batch:(i + 1) * self.batch]
+        e = ep.to_model(ep.augment(self.x_raw[idx], self.rng, self.mean, self.std, self.noise_std))
+        return e, e
 
 
-def chrono_split(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    n_val = max(1, int(len(x) * VAL_FRACTION))
-    return x[:-n_val], x[-n_val:]
+def load_splits(path: Path) -> dict:
+    d = ep.load_epochs(path)
+    ok = ep.gate(d)
+    tr, va, te = ep.chrono_split(len(d["X"]))
+    correct = (d["y"] == 0) & ok
+    s = {"d": d, "ok": ok, "train": tr[correct[tr]], "val": va[correct[va]], "test": te[ok[te]]}
+    e_train = ep.preprocess(d["X"][s["train"]])
+    s["mean"], s["std"] = ep.channel_stats(e_train)
+    return s
 
 
-def main() -> None:
+def train_one(arch, s, args):
+    keras.utils.set_random_seed(args.seed)
+    model = BUILDERS[arch]()
+    model.compile(optimizer=keras.optimizers.AdamW(learning_rate=args.lr, weight_decay=args.weight_decay), loss="mse")
+    x = s["d"]["X"]
+    e_val = ep.to_model(ep.normalize(ep.preprocess(x[s["val"]]), s["mean"], s["std"]))
+    e_tr = ep.to_model(ep.normalize(ep.preprocess(x[s["train"]]), s["mean"], s["std"]))
+    gen = AugmentedEpochs(x[s["train"]], s["mean"], s["std"], args.batch, args.seed, args.noise)
+    hist = model.fit(gen, validation_data=(e_val, e_val), epochs=args.epochs, verbose=0,
+                     callbacks=[keras.callbacks.EarlyStopping(patience=args.patience, restore_best_weights=True)])
+    val = float(model.evaluate(e_val, e_val, verbose=0))
+    train_clean = float(model.evaluate(e_tr, e_tr, verbose=0))
+    best_epoch = int(np.argmin(hist.history["val_loss"]))
+    print(f"[{arch:5s}] params {model.count_params():6d}  epochs {len(hist.history['loss']):3d} "
+          f"(best {best_epoch})  train MSE {train_clean:.4f}  val MSE {val:.4f}  val/train {val / train_clean:.2f}")
+    return model, {"arch": arch, "params": model.count_params(), "best_epoch": best_epoch,
+                   "train_mse": train_clean, "val_mse": val, "overfit_ratio": val / train_clean}
+
+
+def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--normal", type=Path, default=DEFAULT_NORMAL)
-    ap.add_argument("--out", type=Path, default=DEFAULT_MODEL)
-    ap.add_argument("--epochs", type=int, default=300)
-    ap.add_argument("--batch", type=int, default=64)
+    ap.add_argument("--data", type=Path, default=DEFAULT_DATA)
+    ap.add_argument("--arch", choices=["auto", "conv", "dense"], default="auto")
+    ap.add_argument("--epochs", type=int, default=400)
+    ap.add_argument("--patience", type=int, default=40)
+    ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--patience", type=int, default=25, help="epochs sin mejorar val antes de parar")
+    ap.add_argument("--weight-decay", type=float, default=1e-4)
+    ap.add_argument("--noise", type=float, default=0.1, help="σ del ruido gaussiano (unidades z)")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
+    s = load_splits(args.data)
+    d = s["d"]
+    print(f"{args.data}: {len(d['X'])} epochs, gate rechaza {(~s['ok']).sum()}, "
+          f"train {len(s['train'])} / val {len(s['val'])} correctos, test {len(s['test'])} (con errores)")
 
-    x, cols, _ = load_features(args.normal)
-    x_train, x_val = chrono_split(x)
-    mean = x_train.mean(axis=0)
-    std = x_train.std(axis=0)
-    std[std < 1e-6] = 1.0  # feature constante: no escalar
-    print(f"normal: {len(x)} ventanas ({len(x_train)} train / {len(x_val)} val), {len(cols)} features")
+    archs = ["conv", "dense"] if args.arch == "auto" else [args.arch]
+    results = [train_one(a, s, args) for a in archs]
+    model, info = min(results, key=lambda r: r[1]["val_mse"])
+    print(f"elegido: {info['arch']}")
 
-    t_train = torch.from_numpy((x_train - mean) / std)
-    t_val = torch.from_numpy((x_val - mean) / std)
-
-    model = Autoencoder()
-    loss_fn = nn.MSELoss()
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
-
-    best_val, best_epoch, best_state = float("inf"), -1, None
-    for epoch in range(args.epochs):
-        model.train()
-        perm = torch.randperm(len(t_train))
-        train_loss = 0.0
-        for i in range(0, len(perm), args.batch):
-            xb = t_train[perm[i:i + args.batch]]
-            opt.zero_grad()
-            loss = loss_fn(model(xb), xb)
-            loss.backward()
-            opt.step()
-            train_loss += loss.item() * len(xb)
-        train_loss /= len(t_train)
-
-        model.eval()
-        with torch.no_grad():
-            val_loss = loss_fn(model(t_val), t_val).item()
-        if val_loss < best_val:
-            best_val, best_epoch = val_loss, epoch
-            best_state = {k: v.clone() for k, v in model.state_dict().items()}
-        if epoch % 10 == 0 or epoch == args.epochs - 1:
-            print(f"epoch {epoch:4d}  train {train_loss:.5f}  val {val_loss:.5f}  best {best_val:.5f}@{best_epoch}")
-        if epoch - best_epoch >= args.patience:
-            print(f"early stop en epoch {epoch} (sin mejora desde {best_epoch})")
-            break
-
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({
-        "state_dict": best_state,
-        "mean": mean.tolist(),
-        "std": std.tolist(),
-        "features": cols,
-        "best_epoch": best_epoch,
-        "best_val_mse": best_val,
-        "normal_csv": str(args.normal),
-        "n_train": len(x_train),
-        "n_val": len(x_val),
-        "seed": args.seed,
-    }, args.out)
-    print(f"guardado {args.out} (val MSE {best_val:.5f}, epoch {best_epoch})")
+    MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    model.save(MODEL_PATH)
+    META_PATH.write_text(json.dumps({
+        **info,
+        "candidates": [r[1] for r in results],
+        "data": str(args.data),
+        "synthetic": bool(d.get("synthetic", False)),
+        "mean": s["mean"].tolist(),
+        "std": s["std"].tolist(),
+        "split": {"fractions": [0.70, 0.15, 0.15], "n_train": len(s["train"]),
+                  "n_val": len(s["val"]), "n_test": len(s["test"])},
+        "hyper": {k: v for k, v in vars(args).items() if k not in ("data",)},
+    }, indent=2) + "\n")
+    print(f"guardado {MODEL_PATH} y {META_PATH.name}")
 
 
 if __name__ == "__main__":

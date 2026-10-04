@@ -1,0 +1,14 @@
+[project]
+name = "intune-detector-ml"
+version = "0.2.0"
+description = "INTUNE C2 Detector: ErrP autoencoder (Keras -> TFLite int8) y baseline LDA"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "tensorflow>=2.16",
+    "numpy",
+    "scipy",
+    "scikit-learn",
+]
+
+[tool.uv]
+package = false
