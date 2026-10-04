@@ -13,7 +13,7 @@ A fully embedded pipeline (no PC, no g.tec dongle) that monitors an operator's E
 ## Architecture
 
 ```
-Unicorn Hybrid Black ──BT Classic SPP──> classic ESP32 ──UART 921600──> ESP32-S3 ──  UART  ──────> arm
+Unicorn Hybrid Black ──BT Classic SPP──> classic ESP32 ──UART 921600──> ESP32-S3 ─────UART─────> arm ESP32
    8 EEG ch @ 250 Hz                     receives, validates,           autoencoder,              applies the reaction
                                          filters with CLEEGN            graded alerts             (slow down, pause, stop)
 ```
@@ -22,7 +22,7 @@ Unicorn Hybrid Black ──BT Classic SPP──> classic ESP32 ──UART 921600
 |---|---|
 | **Classic ESP32** | Connects to the g.tec Unicorn Hybrid Black over Bluetooth Classic (the S3 has BLE only). Parses and validates frames, cleans the EEG with **CLEEGN** (a CNN for EEG reconstruction) and streams it to the S3. |
 | **ESP32-S3** | Runs an **autoencoder** on the filtered EEG and turns its output into an alert level. |
-| **Arm ESP32** | Controls the robotic arm. Receives alerts over TCP and applies the matching reaction. |
+| **Arm ESP32** | Controls the robotic arm. Receives alerts from the S3 over UART and applies the matching reaction. |
 
 ### Alert levels (draft)
 
@@ -46,7 +46,7 @@ The system is fail-safe: if the arm loses the heartbeat from the S3, or the S3 l
 | CLEEGN on the classic ESP32 | ⏳ |
 | UART link ESP32 → S3 | ⏳ |
 | Autoencoder on the S3 | ⏳ |
-| Arm controller over TCP | ⏳ |
+| UART link S3 → arm, arm controller | ⏳ |
 
 Findings so far:
 - **No pairing needed.** The Unicorn accepts an RFCOMM connection on channel 1 with no PIN or SSP.
@@ -59,7 +59,7 @@ tools/linux_probe/unicorn_probe.py   # PC tool: connect to the Unicorn, parse, m
 firmware/common/                     # Shared headers (Unicorn protocol + parser, inter-node protocols)
 firmware/bridge_esp32/               # Classic ESP32: BT acquisition + CLEEGN (PlatformIO, ESP-IDF)
 firmware/detector_s3/                # ESP32-S3: autoencoder + alerts
-firmware/arm_esp32/                  # Arm controller: TCP server + reactions
+firmware/arm_esp32/                  # Arm controller: UART from the S3 + reactions
 ml/                                  # Training and export of CLEEGN and the autoencoder
 ```
 
