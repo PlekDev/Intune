@@ -42,7 +42,8 @@ The system is fail-safe: if the arm loses the heartbeat from the S3, or the S3 l
 | PC ↔ Unicorn over RFCOMM (protocol verified) | ✅ 0 % loss at 250 Hz |
 | ESP32 ↔ Unicorn: discovery, connection, start/ACK | ✅ |
 | Frame validation on the ESP32 | ✅ 11,330 consecutive frames, 0 gaps |
-| 10-minute integrity test, signal check | ⏳ |
+| 10-minute integrity test on the ESP32 | ✅ 0.001 % loss (2 of 176,197 samples, 1 gap), 0 corrupt frames, 0 reconnections in 11.5 min |
+| Signal check (alpha with eyes closed, jaw artifact) | ⏳ |
 | CLEEGN on the classic ESP32 | ⏳ |
 | UART link ESP32 → S3 | ⏳ |
 | Autoencoder on the S3 | ⏳ |
