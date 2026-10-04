@@ -1,0 +1,26 @@
+# Claude Code context (local only)
+CLAUDE.md
+.claude/
+
+# PlatformIO / ESP-IDF build output
+.pio/
+.cache/
+compile_commands.json
+sdkconfig.*
+!sdkconfig.defaults
+managed_components/
+dependencies.lock
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Recordings and trained models
+*.csv
+data/
+logs/
+*.tflite
+*.h5
+*.pt
+*.onnx

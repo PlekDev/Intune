@@ -1,0 +1,72 @@
+menu "Unicorn bridge"
+
+config UNICORN_MAC
+    string "MAC del Unicorn (AA:BB:CC:DD:EE:FF)"
+    default "60:B6:47:E1:27:0F"
+
+config UNICORN_SCN
+    int "Canal RFCOMM (0 = obtener por SDP)"
+    range 0 30
+    default 0
+
+config UNICORN_INQUIRY_FIRST
+    bool "Hacer inquiry antes de cada conexión"
+    default y
+    help
+        Sin inquiry el ESP32 recibía Page Timeout (0x4) mientras la PC (que hace
+        inquiry) conectaba. Se corta en cuanto aparece la MAC del Unicorn.
+
+config UNICORN_SEC_AUTH
+    bool "Exigir autenticación (ESP_SPP_SEC_AUTHENTICATE)"
+    default n
+    help
+        En Linux el Unicorn aceptó RFCOMM sin emparejar. Activar solo si falla sin seguridad.
+
+config UNICORN_PIN
+    string "PIN para legacy pairing (si lo pide)"
+    default "0000"
+
+config BRIDGE_UART_BAUD
+    int "Baud UART hacia el S3"
+    default 921600
+
+config BRIDGE_UART_TX_GPIO
+    int "GPIO TX UART hacia el S3"
+    default 17
+
+config BRIDGE_UART_RX_GPIO
+    int "GPIO RX UART (no usado, reservado)"
+    default 16
+
+config BRIDGE_STATUS_GPIO
+    int "GPIO de estado hacia el S3 (alto = streaming)"
+    default 4
+
+config BRIDGE_LED_GPIO
+    int "GPIO del LED (-1 = sin LED)"
+    default 2
+
+config BRIDGE_BUTTON_GPIO
+    int "GPIO botón stop/reanudar, activo bajo (-1 = sin botón)"
+    default 0
+
+config BRIDGE_STATS_PERIOD_S
+    int "Periodo de stats por log (s)"
+    default 5
+
+config BRIDGE_RX_TIMEOUT_MS
+    int "Sin datos en streaming durante este tiempo => reconectar (ms)"
+    default 3000
+
+config BRIDGE_VALIDATE
+    bool "Monitor pasivo: parsear y validar tramas (stats de huecos)"
+    default y
+    help
+        Parsea una copia de lo que se envía por UART (no altera el stream).
+        Da los huecos del lado del puente para compararlos con el S3 (prueba 8).
+
+config BRIDGE_BT_DEBUG_LOGS
+    bool "Logs BT (GAP/SPP) en DEBUG"
+    default n
+
+endmenu
