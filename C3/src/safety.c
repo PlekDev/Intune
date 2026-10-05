@@ -8,6 +8,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "motion.h"
+#if CONFIG_ARM_LOCAL_DETECTOR
+#include "detector.h"
+#endif
 
 static const char *TAG = "safety";
 
@@ -66,6 +69,7 @@ static void on_frame(uint8_t type, const uint8_t *payload, uint8_t len, void *ct
     if (prev != a.level) ESP_LOGI(TAG, "S3: nivel %u (razón %u, score %.3f)", a.level, a.reason, a.score);
 }
 
+#if !CONFIG_ARM_LOCAL_DETECTOR
 static void uart_rx_task(void *arg)
 {
     uint8_t buf[64];
@@ -74,6 +78,7 @@ static void uart_rx_task(void *arg)
         if (n > 0) arm_rx_feed(&s_rx, buf, (size_t)n, on_frame, NULL);
     }
 }
+#endif
 
 static void sim_task(void *arg)
 {
@@ -124,9 +129,13 @@ static void send_status(void)
         .crc_errors = s_rx.crc_errors, .espnow_fail = m.fails,
     };
     portEXIT_CRITICAL(&s_mux);
+#if !CONFIG_ARM_LOCAL_DETECTOR
     uint8_t f[ARM_MAX_FRAME];
     size_t n = arm_encode_status(f, &st);
     uart_write_bytes(S3_UART, f, n);
+#else
+    (void)st;  // sin S3: la UART es del detector (EEG del puente)
+#endif
 }
 
 static void set_led(uint8_t st, uint32_t tick)
@@ -222,6 +231,7 @@ void safety_init(void)
     arm_rx_init(&s_rx);
     arm_rx_init(&s_rx_sim);
 
+#if !CONFIG_ARM_LOCAL_DETECTOR
     uart_config_t uc = {
         .baud_rate = ARM_BAUD, .data_bits = UART_DATA_8_BITS, .parity = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1, .flow_ctrl = UART_HW_FLOWCTRL_DISABLE, .source_clk = UART_SCLK_DEFAULT,
@@ -230,6 +240,7 @@ void safety_init(void)
     ESP_ERROR_CHECK(uart_param_config(S3_UART, &uc));
     ESP_ERROR_CHECK(uart_set_pin(S3_UART, CONFIG_ARM_S3_UART_TX_GPIO, CONFIG_ARM_S3_UART_RX_GPIO,
                                  UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+#endif
 
     gpio_config_t led = {.pin_bit_mask = 1ULL << CONFIG_ARM_LED_GPIO, .mode = GPIO_MODE_OUTPUT};
     ESP_ERROR_CHECK(gpio_config(&led));
@@ -238,11 +249,18 @@ void safety_init(void)
     ESP_ERROR_CHECK(gpio_config(&btn));
 
     apply(ARM_SAFETY_NO_S3);   // nada se mueve hasta el primer heartbeat
+#if !CONFIG_ARM_LOCAL_DETECTOR
     xTaskCreate(uart_rx_task, "s3_rx", 3072, NULL, 12, NULL);
+#endif
     xTaskCreate(sim_task, "s3_sim", 3072, NULL, 11, NULL);
     xTaskCreate(safety_task, "safety", 4096, NULL, 13, NULL);
+#if CONFIG_ARM_LOCAL_DETECTOR
+    ESP_LOGI(TAG, "niveles del detector local (detector.c), heartbeat timeout %d ms. Sin EEG: brazo retenido.",
+             ARM_HEARTBEAT_TIMEOUT_MS);
+#else
     ESP_LOGI(TAG, "UART S3 %d baud TX=%d RX=%d, heartbeat timeout %d ms. Sin S3: brazo retenido.",
              ARM_BAUD, CONFIG_ARM_S3_UART_TX_GPIO, CONFIG_ARM_S3_UART_RX_GPIO, ARM_HEARTBEAT_TIMEOUT_MS);
+#endif
 }
 
 void safety_sim_s3(int level)
@@ -260,13 +278,35 @@ void safety_led_override(bool on)
 
 void safety_send_event(const arm_event_t *e)
 {
+#if !CONFIG_ARM_LOCAL_DETECTOR
     uint8_t f[ARM_MAX_FRAME];
     size_t n = arm_encode_event(f, e);
     uart_write_bytes(S3_UART, f, n);
+#else
+    (void)e;  // el detector local recibe el instante por el EVENT del puente (pulso -> GPIO18)
+#endif
+}
+
+void safety_inject_alert(const arm_alert_t *a)
+{
+    // Parser local en la pila: se puede llamar desde varias tareas (det_task y la del botón/consola)
+    arm_rx_t rx;
+    arm_rx_init(&rx);
+    uint8_t f[ARM_MAX_FRAME];
+    size_t n = arm_encode_alert(f, a);
+    arm_rx_feed(&rx, f, n, on_frame, NULL);  // misma validación que una trama del S3
+}
+
+bool safety_sim_active(void)
+{
+    return s_sim_level >= 0;
 }
 
 void safety_confirm(void)
 {
+#if CONFIG_ARM_LOCAL_DETECTOR
+    detector_operator_ack();  // antes de pedir la confirmación: el nivel ya vale 0
+#endif
     portENTER_CRITICAL(&s_mux);
     s_confirm_req = true;
     portEXIT_CRITICAL(&s_mux);
@@ -274,6 +314,9 @@ void safety_confirm(void)
 
 void safety_reset(void)
 {
+#if CONFIG_ARM_LOCAL_DETECTOR
+    detector_operator_ack();
+#endif
     portENTER_CRITICAL(&s_mux);
     s_reset_req = true;
     portEXIT_CRITICAL(&s_mux);

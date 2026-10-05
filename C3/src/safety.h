@@ -18,5 +18,9 @@ const char *safety_state_name(uint8_t st);
 void safety_log_status(void);
 // El LED deja de mostrar el estado de seguridad mientras lo usa la prueba de inicio (actions.c).
 void safety_led_override(bool on);
-// Envía una trama EVENT al S3 (arm_protocol.h).
+// Envía una trama EVENT al S3 (arm_protocol.h). Con el detector local no hay S3: no hace nada.
 void safety_send_event(const arm_event_t *e);
+// Detector local (detector.c): entrega un ALERT por la misma ruta que la UART del S3.
+void safety_inject_alert(const arm_alert_t *a);
+// true mientras la consola simula el S3 ("s3 <n>"): el detector local se calla.
+bool safety_sim_active(void);

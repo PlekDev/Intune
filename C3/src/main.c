@@ -26,6 +26,7 @@
 //   scan                      busca el AP del brazo, fija canal y peer
 //   cmd <1|2>                 campo cmd del mensaje (2 = loop() del brazo, por defecto)
 //   peer <ap|bcast>           unicast a la MAC del AP del brazo (con ACK, por defecto) o broadcast
+//   det                       estado del detector ErrP local (CONFIG_ARM_LOCAL_DETECTOR)
 //   status
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,6 +43,7 @@
 #include "freertos/task.h"
 #include "nvs_flash.h"
 #include "actions.h"
+#include "detector.h"
 #include "arm_uart.h"
 #include "motion.h"
 #include "roarm_espnow.h"
@@ -238,9 +240,18 @@ static void handle_line(char *line)
         if (!s_unicast) add_peer(BCAST);
         ESP_LOGI(TAG, "peer=%s", s_unicast ? "ap" : "bcast");
 #endif
+    } else if (!strncmp(line, "det", 3)) {
+#if CONFIG_ARM_LOCAL_DETECTOR
+        detector_log_status();
+#else
+        ESP_LOGW(TAG, "detector local desactivado (CONFIG_ARM_LOCAL_DETECTOR)");
+#endif
     } else if (!strncmp(line, "status", 6)) {
         log_status();
         safety_log_status();
+#if CONFIG_ARM_LOCAL_DETECTOR
+        detector_log_status();
+#endif
     } else if (line[0]) {
         ESP_LOGW(TAG, "comando desconocido: %s", line);
     }
@@ -294,6 +305,9 @@ void app_main(void)
 
     motion_init(send_step);
     safety_init();
+#if CONFIG_ARM_LOCAL_DETECTOR
+    detector_init();
+#endif
     actions_init();
     xTaskCreate(console_task, "console", 4096, NULL, 5, NULL);
 #if CONFIG_ARM_LINK_UART

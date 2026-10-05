@@ -1,0 +1,4 @@
+## Dependencias del componente principal: TFLite Micro para el ErrP-AE (detector local)
+dependencies:
+  idf: ">=5.1"
+  espressif/esp-tflite-micro: "^1.4.1"

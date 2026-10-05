@@ -1,0 +1,70 @@
+{
+  "subject": "S01",
+  "start": "2026-10-04T21:27:52",
+  "seed": 1791170871,
+  "n_actions": 300,
+  "p_error": 0.22,
+  "isi_s": [
+    3.0,
+    4.0
+  ],
+  "no_arm": false,
+  "paradigm": {
+    "rule": "correcta = siguiente postura del anillo; error = anterior (sentido contrario)",
+    "ring_deg": {
+      "izquierda": [
+        -35.0,
+        0.0,
+        90.0,
+        180.0
+      ],
+      "adelante": [
+        0.0,
+        25.0,
+        90.0,
+        180.0
+      ],
+      "derecha": [
+        35.0,
+        0.0,
+        90.0,
+        180.0
+      ],
+      "atrás": [
+        0.0,
+        -20.0,
+        90.0,
+        180.0
+      ]
+    },
+    "vel_deg_s": 17.5
+  },
+  "filter": "scipy.signal.butter(2, [1.0, 15.0], btype='band', fs=250, output='sos'), causal",
+  "channels": [
+    "Fz",
+    "C3",
+    "Cz",
+    "C4",
+    "Pz",
+    "PO7",
+    "Oz",
+    "PO8"
+  ],
+  "fs": 250.0,
+  "sync": "flanco GPIO del brazo -> puente GPIO18 -> trama EVENT",
+  "notes": "primera sesion real con errores; sin bloques; sin descansos",
+  "end": "2026-10-04T21:29:57",
+  "samples": 28994,
+  "bridge_reboots": 0,
+  "action_stats": {},
+  "bridge_final": {
+    "state": 2,
+    "battery": 73,
+    "proc_us_max": 219,
+    "frames": 28819,
+    "gaps": 0,
+    "lost": 0,
+    "reconnects": 0,
+    "crc_pc": 0
+  }
+}

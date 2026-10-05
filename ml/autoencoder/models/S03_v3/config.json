@@ -1,0 +1,88 @@
+{
+  "_comentario": "Generado por ml/autoencoder/train_errp_ae.py. norm = media/std agregadas de las \u00e9pocas correctas de entrenamiento (calibraci\u00f3n por defecto del S3); thresholds = percentiles del score MSE de las \u00e9pocas correctas held-out. En el S3 se recalibra por operador y sesi\u00f3n.",
+  "arch": "errp_conv",
+  "channels": [
+    "Fz",
+    "C3",
+    "Cz",
+    "C4",
+    "Pz",
+    "PO7",
+    "Oz",
+    "PO8"
+  ],
+  "fs_hz": 250,
+  "decim": 5,
+  "epoch_ms": [
+    -200,
+    800
+  ],
+  "baseline_ms": [
+    -200,
+    0
+  ],
+  "norm": {
+    "mean": [
+      0.29030496,
+      -0.41431138,
+      -0.30423337,
+      -0.424704,
+      -0.41393602,
+      -0.23932977,
+      -0.50340635,
+      -0.5025576
+    ],
+    "std": [
+      24.006737,
+      14.029857,
+      14.625213,
+      14.480333,
+      11.921427,
+      11.389778,
+      9.745012,
+      9.644945
+    ]
+  },
+  "percentiles": [
+    90,
+    97,
+    99
+  ],
+  "thresholds": {
+    "p90": 0.29856044,
+    "p97": 0.8625479,
+    "p99": 1.6560105
+  },
+  "score": "mse",
+  "placeholder": false,
+  "training": {
+    "data": "c2_train.npz (sha256 87f24ec7eaea866c)",
+    "seed": 0,
+    "n_correct_train": 208,
+    "n_correct_heldout": 52,
+    "n_error": 101,
+    "split": "random",
+    "heldout_sessions": [],
+    "norm": "session",
+    "epochs_max": 300,
+    "epochs_run": 157,
+    "best_epoch": 142,
+    "early_stopping": true,
+    "patience": 15,
+    "batch_size": 32,
+    "device": "cpu",
+    "lr": 0.001,
+    "l2": 0.0001,
+    "augment": {
+      "jitter_ms": 20.0,
+      "jitter_samples": 5,
+      "jitter_fs_hz": 250,
+      "noise_std": 0.05,
+      "gain": 0.1
+    },
+    "heldout_mse": 0.25315344,
+    "n_params": 48888,
+    "n_macs": 76288,
+    "n_rep": 208
+  }
+}

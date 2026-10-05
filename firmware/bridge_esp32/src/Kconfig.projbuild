@@ -50,6 +50,14 @@ config BRIDGE_BUTTON_GPIO
     int "GPIO botón stop/reanudar, activo bajo (-1 = sin botón)"
     default 0
 
+config BRIDGE_SYNC_GPIO
+    int "GPIO entrada del pulso de sincronía del brazo (-1 = no usado)"
+    default 18
+    help
+        Flanco de subida = inicio de una acción del brazo (regla dura 4). El puente lo
+        convierte en número de muestra Unicorn y envía una trama EVENT. Pull-down interno:
+        sin cable queda en bajo. Requiere tierra común con el ESP32 del brazo. 3.3 V máx.
+
 config BRIDGE_STATS_PERIOD_S
     int "Periodo de stats por log (s)"
     default 5
@@ -58,12 +66,25 @@ config BRIDGE_RX_TIMEOUT_MS
     int "Sin datos en streaming durante este tiempo => reconectar (ms)"
     default 3000
 
-config BRIDGE_VALIDATE
-    bool "Monitor pasivo: parsear y validar tramas (stats de huecos)"
+config BRIDGE_UNFILTERED
+    bool "Enviar µV sin filtrar (sin IIR 1-15 Hz), flag UNFILTERED"
+    default n
+    help
+        Solo para comparar. Los huecos se tratan igual (ZOH + flags).
+
+config BRIDGE_LINK_RAW
+    bool "Enviar también tramas EEG_RAW (µV sin filtrar) para verificar el IIR"
     default y
     help
-        Parsea una copia de lo que se envía por UART (no altera el stream).
-        Da los huecos del lado del puente para compararlos con el S3 (prueba 8).
+        Duplica el tráfico (~24 % de 921600). El S3 las ignora. Desactivar para la demo.
+
+config BRIDGE_LINK_MIRROR_CONSOLE
+    bool "Copiar las tramas link al USB (UART0) para graficarlas en la PC"
+    default y
+    help
+        UART0 pasa a BRIDGE_UART_BAUD y se silencian los logs tras el arranque (romperían
+        las tramas binarias). Las stats llegan en las tramas STATUS.
+        Leer con tools/linux_probe/link_view.py. Desactivar para ver logs con pio monitor.
 
 config BRIDGE_BT_DEBUG_LOGS
     bool "Logs BT (GAP/SPP) en DEBUG"
