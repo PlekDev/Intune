@@ -2,10 +2,10 @@
 """INTUNE C3: mueve el brazo de A a B y de vuelta, sin fin, a través del supervisor (ESP32 por USB).
 
 Uso (Linux, macOS o Windows; solo necesita pyserial):
-  python firmware/arm_esp32/tools/move_ab.py                  # A y B por defecto, hasta Ctrl+C
-  python firmware/arm_esp32/tools/move_ab.py --a -45,0,90,180 --b 45,20,110,180 --vel 25 --pausa 2
-  python firmware/arm_esp32/tools/move_ab.py --reps 3         # solo 3 idas y vueltas
-  python firmware/arm_esp32/tools/move_ab.py --port COM5      # si no encuentra el puerto solo
+  python C3/tools/move_ab.py                  # A y B por defecto, hasta Ctrl+C
+  python C3/tools/move_ab.py --a -45,0,90,180 --b 45,20,110,180 --vel 25 --pausa 2
+  python C3/tools/move_ab.py --reps 3         # solo 3 idas y vueltas
+  python C3/tools/move_ab.py --port COM5      # si no encuentra el puerto solo
 
 Ctrl+C: el brazo se detiene en el acto y queda quieto con torque (no cae).
 

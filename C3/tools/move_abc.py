@@ -2,10 +2,10 @@
 """INTUNE C3: mueve el brazo por tres puntos A -> B -> C -> A ..., sin fin, a través del supervisor.
 
 Uso (Linux, macOS o Windows; solo necesita pyserial):
-  python firmware/arm_esp32/tools/move_abc.py                  # puntos por defecto, hasta Ctrl+C
-  python firmware/arm_esp32/tools/move_abc.py --vel 30 --pausa 1.5
-  python firmware/arm_esp32/tools/move_abc.py --a -70,0,90,180 --b 0,25,115,130 --c 70,-10,80,180
-  python firmware/arm_esp32/tools/move_abc.py --reps 2 --port COM5
+  python C3/tools/move_abc.py                  # puntos por defecto, hasta Ctrl+C
+  python C3/tools/move_abc.py --vel 30 --pausa 1.5
+  python C3/tools/move_abc.py --a -70,0,90,180 --b 0,25,115,130 --c 70,-10,80,180
+  python C3/tools/move_abc.py --reps 2 --port COM5
 
 Ctrl+C: el brazo se detiene en el acto y queda quieto con torque (no cae).
 

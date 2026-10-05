@@ -1,5 +1,5 @@
 // Prueba en PC de firmware/common/arm_protocol.h:
-//   gcc -Wall -Wextra -O2 -I../../common test_arm_protocol.c -o /tmp/t && /tmp/t
+//   gcc -Wall -Wextra -O2 -I../../firmware/common test_arm_protocol.c -o /tmp/t && /tmp/t
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
