@@ -161,7 +161,7 @@ static void calib_finish(void)
         double m = s / n;
         double sd = sqrt(fmax(s2 / n - m * m, 0.0));
         s_cal.mean[c] = (float)m;
-        s_cal.std[c] = sd < 1e-6 ? 1.0f : (float)sd;
+        s_cal.std[c] = fmaxf((float)sd, ERRP_STD_FLOOR);  // piso como build_dataset.py
     }
     static float scores[150];
     for (int i = 0; i < s_calib_n; i++) {
@@ -187,13 +187,18 @@ static void calib_finish(void)
 // ---------- epoch ----------
 static void process_pulse(const pulse_t *p, uint16_t action_id, uint8_t *flags_out, float *score_out)
 {
-    static float ep[ERRP_N_CH][ERRP_EPOCH_LEN];
+    static float win[ERRP_N_CH][ERRP_EPOCH_LEN];
     static float e[ERRP_N_CH][ERRP_N_T];
-    errp_epoch_status_t st = ERRP_EPOCH_MISSING;
+    errp_epoch_status_t st = ERRP_EPOCH_COUNTER;
+    errp_window_info_t info = {0};
     if (p->counter_ok) {
         xSemaphoreTake(s_ring_lock, portMAX_DELAY);
-        st = errp_epoch_cut(&s_ring, p->counter, (float)CONFIG_DETECTOR_GATE_GYRO_DPS, ep);
+        st = errp_epoch_cut(&s_ring, p->counter, win, &info);
         xSemaphoreGive(s_ring_lock);
+    }
+    if (st == ERRP_EPOCH_OK) {
+        errp_preprocess(win, e);  // X [8][40] µV, como el dataset de C4
+        st = errp_epoch_gate(&info, e, (float)CONFIG_DETECTOR_GATE_GYRO_DPS);
     }
     uint8_t flags = s_calibrating ? ARM_FLAG_CALIBRATING : 0;
     float ae = NAN, lda = NAN;
@@ -205,8 +210,7 @@ static void process_pulse(const pulse_t *p, uint16_t action_id, uint8_t *flags_o
             errp_alert_rejected(&s_alert);
         }
     } else {
-        errp_preprocess(ep, e);
-        lda = errp_lda_score(ep);
+        lda = errp_lda_score(e);
         if (s_calibrating) {
             memcpy(s_calib_epochs[s_calib_n], e, sizeof(e));
             s_calib_lda[s_calib_n] = lda;
@@ -362,14 +366,19 @@ bool detector_selftest(void)
 {
     bool ok = true;
     for (int i = 0; i < ERRP_N_GOLDEN; i++) {
-        float s = errp_model_score(ERRP_GOLDEN_INPUT[i], NULL);
+        // Misma ruta que en vivo: X µV -> LDA y normalización por canal -> modelo
+        static float z[ERRP_N_CH][ERRP_N_T];
+        memcpy(z, ERRP_GOLDEN_X[i], sizeof(z));
+        float lda = errp_lda_score(z);
+        errp_normalize(z, ERRP_GOLDEN_MEAN[i], ERRP_GOLDEN_STD[i]);
+        float s = errp_model_score(z, NULL);
         float ref = ERRP_GOLDEN_SCORE_INT8[i];
         float rel = fabsf(s - ref) / fmaxf(ref, 1e-6f);
-        bool pass = rel < 0.02f;
+        bool pass = rel < 0.02f && fabsf(lda - ERRP_GOLDEN_LDA[i]) < 1e-3f;
         ok &= pass;
-        ESP_LOGI(TAG, "golden %d (label %d): S3 %.5f, PC int8 %.5f, float %.5f, err rel %.2e %s (%" PRId64 " us)",
-                 i, ERRP_GOLDEN_LABEL[i], s, ref, ERRP_GOLDEN_SCORE_FLOAT[i], rel, pass ? "OK" : "FALLA",
-                 errp_model_last_us());
+        ESP_LOGI(TAG, "golden %d (label %d): S3 %.5f, PC int8 %.5f, float %.5f, err rel %.2e, LDA %.4f/%.4f %s"
+                 " (%" PRId64 " us)", i, ERRP_GOLDEN_LABEL[i], s, ref, ERRP_GOLDEN_SCORE_FLOAT[i], rel, lda,
+                 ERRP_GOLDEN_LDA[i], pass ? "OK" : "FALLA", errp_model_last_us());
     }
     printf("{\"ev\":\"selftest\",\"pass\":%d,\"arena\":%u,\"inf_us\":%" PRId64 "}\n", ok,
            (unsigned)errp_model_arena_used(), errp_model_last_us());

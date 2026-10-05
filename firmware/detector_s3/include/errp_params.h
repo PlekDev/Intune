@@ -1,51 +1,54 @@
 // GENERADO por ml/autoencoder/training/export_headers.py. No editar a mano.
-// Datos de entrenamiento: synthetic_epochs.npz (SINTÉTICOS)
+// Datos: synth_s1, synth_s2, synth_s3, synth_s4 (SINTÉTICOS); dataset intune-c4-dataset-1.0
 #pragma once
 #include <stdint.h>
 
-// Preprocesamiento (idéntico a ml/autoencoder/errp_pipeline.py)
-// Filtro (en C1): scipy.signal.butter(2, [1, 15], btype='band', fs=250, output='sos'), sosfilt causal
+// Cadena de FORMAT.md §2 (C4) / CLAUDE.md "Signal chain"
 #define ERRP_FS_HZ         250
 #define ERRP_N_CH          8
 #define ERRP_PRE           50     // muestras de baseline, [-200, 0) ms
 #define ERRP_POST          200    // muestras de [0, 800) ms
 #define ERRP_DECIM         5     // media de cada 5 -> 50 Hz
-#define ERRP_N_T           40    // muestras por canal que ve el modelo
-#define ERRP_GATE_UV       100.0f
-#define ERRP_FLAT_STD_UV   0.100000001f
+#define ERRP_N_T           40    // muestras por canal de X
+#define ERRP_STD_FLOOR     0.00100000005f
 
-// Normalización z-score por canal (offline; la calibración del S3 la reemplaza)
+// Puerta de artefactos (FORMAT.md §3), los valores con los que C4 construyó el dataset
+#define ERRP_GATE_UV       100.0f   // max |X| tras baseline y diezmado
+#define ERRP_FLAT_STD_UV   0.0500000007f   // std de un canal de X
+#define ERRP_GATE_GYRO_DPS 30.0f   // rango pico a pico por eje (máx. de 3), ventana de 250
+
+// Normalización z-score por canal (promedio offline; la calibración del S3 la reemplaza)
 static const float ERRP_DEFAULT_MEAN[ERRP_N_CH] = {
-    0.184472471f, 0.112320565f, -0.0194016732f, 0.0151566155f, 0.246424317f, 0.0842174813f, -0.233276233f, 0.345423728f
+    -0.845736504f, -0.24983038f, -0.0896149576f, -0.813689411f, 0.239417136f, -0.660884798f, 0.719768286f, -0.249251842f
 };
 static const float ERRP_DEFAULT_STD[ERRP_N_CH] = {
-    11.1833868f, 6.60497665f, 8.27284527f, 6.70692253f, 6.78470755f, 6.20486498f, 7.3311553f, 7.62548018f
+    12.2941093f, 13.1110411f, 16.9053268f, 15.6706095f, 14.1249418f, 12.4570074f, 16.114212f, 12.7887526f
 };
 
 // Umbrales del score MSE (offline; la calibración del S3 los reemplaza)
-#define ERRP_DEFAULT_T1    0.759763241f  // p90
-#define ERRP_DEFAULT_T2    1.24819207f  // p97
-#define ERRP_DEFAULT_T3    1.47142708f  // p99
+#define ERRP_DEFAULT_T1    0.819430768f  // p90
+#define ERRP_DEFAULT_T2    1.51988041f  // p97
+#define ERRP_DEFAULT_T3    2.39221358f  // p99
 #define ERRP_PCT_T1        90.0f
 #define ERRP_PCT_T2        97.0f
 #define ERRP_PCT_T3        99.0f
 
 // Baseline LDA (scorer de respaldo): score = w . f + b
-// f[ch * 8 + bin] = media µV (baseline restado) en [edges[bin], edges[bin+1]) muestras desde t = 0
+// f[ch * 8 + bin] = media de X[ch][edges[bin] .. edges[bin+1]) (µV, 50 Hz)
 #define ERRP_LDA_N_BINS    8
-static const int16_t ERRP_LDA_EDGES[ERRP_LDA_N_BINS + 1] = { 38, 55, 72, 89, 106, 123, 141, 158, 175 };
+static const int16_t ERRP_LDA_EDGES[ERRP_LDA_N_BINS + 1] = { 8, 11, 14, 18, 21, 25, 28, 32, 35 };
 static const float ERRP_LDA_W[ERRP_N_CH * ERRP_LDA_N_BINS] = {
-    0.0178424865f, -0.0255279411f, 0.00296955789f, 0.0318295695f, -0.0213701949f, -0.00870508235f, -0.0220798403f, 0.00830410048f,
-    0.0496058986f, -0.0736903101f, 0.0300910082f, 0.00558415847f, 0.0195945017f, -0.0472808369f, -0.0430352464f, 0.00357849686f,
-    0.0329892412f, -0.0637937859f, 0.0323722549f, 0.0839430839f, 0.0216496233f, -0.0405025631f, -0.024050381f, -0.0302184746f,
-    0.0265778825f, -0.0281136148f, -0.0072502913f, 0.0101412823f, 0.039447166f, -0.00852330867f, -0.00484089879f, -0.00342038809f,
-    -0.00750506762f, -0.0472186394f, 0.026197115f, 0.0467578731f, 0.0259143654f, -0.0284345169f, -0.0195789319f, -0.0351549946f,
-    0.0302522015f, -0.0492152944f, 0.0098034367f, -0.00207910431f, -0.0186338797f, 0.0167266764f, -0.025149934f, -0.0148179401f,
-    0.00809119549f, -0.00719538843f, -0.00238278252f, 0.0258908644f, 0.0133348955f, 0.0123990756f, -0.015544856f, -0.00588503852f,
-    0.0151435938f, -0.0382614024f, -0.00523889624f, 0.00759933982f, -0.00114455156f, 0.00193472719f, 0.0233656205f, -0.0487803109f
+    -0.00234691333f, -0.0505763963f, 0.0382611938f, 0.0459871963f, -0.0172319505f, -0.00558901625f, 0.00422707573f, 0.0132211782f,
+    -0.000945572159f, -0.0162428096f, 0.0193212088f, 0.00667204289f, -0.012350291f, -0.00894552283f, 0.0205455907f, -0.00691271154f,
+    0.00379627198f, -0.0265862122f, 0.014414303f, 0.0250116643f, -0.0106921988f, -0.00914920587f, 0.00115499087f, -0.000784569944f,
+    0.00277776923f, -0.0237570535f, 0.0206628088f, 0.0158437565f, 0.00111998396f, -0.000163853561f, -0.00327169057f, 0.00929629616f,
+    -0.0117388936f, -0.0121894004f, 0.0126122087f, 0.0155991791f, -0.00456086174f, -0.00282106269f, 0.00274466048f, 0.0063887164f,
+    0.00531753292f, 0.00884751417f, -0.0141966334f, -0.0076016169f, 0.0163040832f, -0.00334399287f, 0.0101550976f, -0.00451410841f,
+    0.000842266774f, 0.00083063537f, -0.00207876088f, 0.00911189336f, 0.00325084431f, -0.00249023968f, 0.000620267005f, -0.00602992345f,
+    0.0030363414f, -0.00800285116f, -0.00781121803f, -0.00354088959f, 0.000514525047f, -0.00429449975f, 0.000957066601f, 0.00199492672f
 };
-#define ERRP_LDA_B         -2.03663588f
-#define ERRP_LDA_AUC       0.814722896f
+#define ERRP_LDA_B         -1.87975049f
+#define ERRP_LDA_AUC       0.808258176f
 
 // IIR causal 1-15 Hz (regla dura 1). Lo aplica C1; el S3 lo usa SOLO en el modo
 // provisional de tramas Unicorn crudas (DETECTOR_INPUT_RAW_UNICORN).

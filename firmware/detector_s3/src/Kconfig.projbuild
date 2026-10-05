@@ -2,14 +2,13 @@ menu "INTUNE detector"
 
 choice DETECTOR_INPUT
     prompt "Formato del enlace desde el puente (C1)"
-    default DETECTOR_INPUT_RAW_UNICORN
-    help
-        Hoy el puente reenvía tramas Unicorn crudas de 45 B. Cuando C1 publique
-        firmware/common/link_protocol.h (EEG ya filtrado + flags + CRC) se agrega
-        ese backend en eeg_input.c y se vuelve el default.
+    default DETECTOR_INPUT_LINK
+
+config DETECTOR_INPUT_LINK
+    bool "link_protocol.h (EEG filtrado, flags y STATUS del puente)"
 
 config DETECTOR_INPUT_RAW_UNICORN
-    bool "Tramas Unicorn crudas (provisional: el S3 aplica el IIR 1-15 Hz)"
+    bool "Tramas Unicorn crudas (respaldo: el S3 aplica el IIR 1-15 Hz)"
 endchoice
 
 config DETECTOR_LINK_BAUD
@@ -45,8 +44,11 @@ config DETECTOR_EVENT_LATENCY_OFFSET_US
         del tiempo del flanco antes de convertirlo a contador.
 
 config DETECTOR_GATE_GYRO_DPS
-    int "Gate de movimiento de cabeza: |gyro| máximo en el epoch (°/s, 0 = desactivado)"
+    int "Gate de movimiento: rango pico a pico de gyro por eje en la ventana (°/s, 0 = off)"
     default 30
+    help
+        Igual que build_dataset.py (C4). Debe coincidir con el gate_gyro con el que
+        C4 construyó el dataset; se afina con build_dataset.py --suggest-gyro.
 
 config DETECTOR_EEG_TIMEOUT_MS
     int "Sin tramas válidas durante este tiempo => EEG perdido (nivel 3)"

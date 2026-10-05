@@ -11,77 +11,109 @@ static int fails;
 
 static void check(const char *name, int ok, const char *fmt, double v)
 {
-    printf("%s %-42s ", ok ? "OK  " : "FAIL", name);
+    printf("%s %-50s ", ok ? "OK  " : "FAIL", name);
     printf(fmt, v);
     printf("\n");
     fails += !ok;
 }
 
-int main(void)
+static double max_err(const float a[ERRP_N_CH][ERRP_N_T], const float b[ERRP_N_CH][ERRP_N_T])
 {
-    // Epoch crudo de referencia: [-220, +820) ms -> ventana [-200, +800)
-    static float ep[ERRP_N_CH][ERRP_EPOCH_LEN];
-    int off = ERRP_GOLDEN_RAW_T0 - ERRP_PRE;
-    for (int c = 0; c < ERRP_N_CH; c++) {
-        memcpy(ep[c], &ERRP_GOLDEN_RAW[c][off], sizeof(ep[c]));
-    }
-
-    float pre[ERRP_N_CH][ERRP_N_T];
-    errp_preprocess(ep, pre);
-    double err = 0;
+    double e = 0;
     for (int c = 0; c < ERRP_N_CH; c++)
         for (int t = 0; t < ERRP_N_T; t++)
-            err = fmax(err, fabs(pre[c][t] - ERRP_GOLDEN_RAW_PRE[c][t]));
-    check("preprocesado [8][40] vs Python, err máx µV", err < 1e-4, "%.2e", err);
+            e = fmax(e, fabs(a[c][t] - b[c][t]));
+    return e;
+}
 
-    float lda = errp_lda_score(ep);
-    check("score LDA vs Python, err abs", fabs(lda - ERRP_GOLDEN_RAW_LDA) < 1e-3, "%.2e", fabs(lda - ERRP_GOLDEN_RAW_LDA));
-    check("gate acepta el epoch de referencia", errp_epoch_gate(ep) == ERRP_EPOCH_OK, "%.0f", 0);
+int main(void)
+{
+    // Preprocesado y LDA sobre la ventana de referencia
+    float x[ERRP_N_CH][ERRP_N_T];
+    errp_preprocess(ERRP_GOLDEN_WIN, x);
+    check("preprocesado [8][250] -> [8][40] vs Python, µV", max_err(x, ERRP_GOLDEN_WIN_X) < 1e-4, "%.2e",
+          max_err(x, ERRP_GOLDEN_WIN_X));
+    float lda = errp_lda_score(x);
+    check("LDA de la ventana vs Python", fabsf(lda - ERRP_GOLDEN_WIN_LDA) < 1e-3, "%.2e",
+          fabs(lda - ERRP_GOLDEN_WIN_LDA));
 
-    // Ring buffer: escribir el epoch como stream y recortarlo por contador
+    // Épocas de C4: normalización por canal y LDA
+    double nerr = 0, lerr = 0;
+    for (int g = 0; g < ERRP_N_GOLDEN; g++) {
+        float z[ERRP_N_CH][ERRP_N_T];
+        memcpy(z, ERRP_GOLDEN_X[g], sizeof(z));
+        lerr = fmax(lerr, fabs(errp_lda_score(z) - ERRP_GOLDEN_LDA[g]));
+        errp_normalize(z, ERRP_GOLDEN_MEAN[g], ERRP_GOLDEN_STD[g]);
+        nerr = fmax(nerr, max_err(z, ERRP_GOLDEN_INPUT[g]));
+    }
+    check("normalización por canal de épocas de C4 vs Python", nerr < 1e-4, "%.2e", nerr);
+    check("LDA de épocas de C4 vs Python", lerr < 1e-3, "%.2e", lerr);
+
+    // Ring buffer: escribir la ventana como stream y recortarla por contador
     static errp_ring_t ring;
+    static float win[ERRP_N_CH][ERRP_EPOCH_LEN];
     errp_ring_init(&ring);
     uint32_t t0 = 100000;
     for (int k = 0; k < ERRP_EPOCH_LEN; k++) {
-        float s[ERRP_N_CH];
-        for (int c = 0; c < ERRP_N_CH; c++) s[c] = ep[c][k];
-        errp_ring_put(&ring, t0 - ERRP_PRE + k, s, 0, 0);
+        float s[ERRP_N_CH], gyr[3] = {1.0f, -2.0f, 0.5f};
+        for (int c = 0; c < ERRP_N_CH; c++) s[c] = ERRP_GOLDEN_WIN[c][k];
+        if (k == 100) gyr[1] = 18.0f;  // pico en el eje y: rango 20 °/s
+        errp_ring_put(&ring, t0 - ERRP_PRE + k, s, gyr, 0);
     }
-    static float cut[ERRP_N_CH][ERRP_EPOCH_LEN];
-    errp_epoch_status_t st = errp_epoch_cut(&ring, t0, 30.0f, cut);
-    check("ring: corte por contador == epoch", st == ERRP_EPOCH_OK && !memcmp(cut, ep, sizeof(ep)), "%.0f", st);
-    check("ring: epoch futuro -> not_ready", errp_epoch_cut(&ring, t0 + 1, 30.0f, cut) == ERRP_EPOCH_NOT_READY, "%.0f", 0);
-    float s0[ERRP_N_CH] = {0};
-    errp_ring_put(&ring, t0 + 10, s0, 0, ERRP_SF_GAP);  // nueva muestra marcada
-    for (uint32_t k = t0 + 11; k < t0 + ERRP_POST + 11; k++) errp_ring_put(&ring, k, s0, 0, 0);
-    st = errp_epoch_cut(&ring, t0 + 11, 30.0f, cut);
-    check("ring: GAP dentro de la ventana -> flagged", st == ERRP_EPOCH_FLAGGED, "%.0f", st);
+    errp_window_info_t info;
+    errp_epoch_status_t st = errp_epoch_cut(&ring, t0, win, &info);
+    check("ring: corte por contador == ventana", st == ERRP_EPOCH_OK && !memcmp(win, ERRP_GOLDEN_WIN, sizeof(win)),
+          "%.0f", st);
+    check("ring: gyro = rango pico a pico máx. (20 °/s)", fabsf(info.gyro_metric - 20.0f) < 1e-5f, "%.3f",
+          info.gyro_metric);
+    check("ring: época futura -> not_ready", errp_epoch_cut(&ring, t0 + 1, win, &info) == ERRP_EPOCH_NOT_READY,
+          "%.0f", 0);
+
+    // Gate en el orden de build_dataset.py
+    errp_epoch_cut(&ring, t0, win, &info);
+    errp_preprocess(win, x);
+    check("gate: ventana limpia -> ok", errp_epoch_gate(&info, x, 30.0f) == ERRP_EPOCH_OK, "%.0f", 0);
+    check("gate: gyro 20 > 15 -> gyro", errp_epoch_gate(&info, x, 15.0f) == ERRP_EPOCH_GYRO, "%.0f", 0);
+    errp_window_info_t fi = info;
+    fi.flags_or = ERRP_SF_FILTER_RESET;
+    check("gate: FILTER_RESET -> flags", errp_epoch_gate(&fi, x, 30.0f) == ERRP_EPOCH_FLAGS, "%.0f", 0);
+    float xa[ERRP_N_CH][ERRP_N_T];
+    memcpy(xa, x, sizeof(xa));
+    xa[3][20] = 101.0f;
+    check("gate: |X| = 101 µV -> amplitude", errp_epoch_gate(&info, xa, 30.0f) == ERRP_EPOCH_AMPLITUDE, "%.0f", 0);
+    memcpy(xa, x, sizeof(xa));
+    for (int t = 0; t < ERRP_N_T; t++) xa[5][t] = 3.0f + 0.01f * (t & 1);  // std 0.005 µV
+    check("gate: canal plano -> flat", errp_epoch_gate(&info, xa, 30.0f) == ERRP_EPOCH_FLAT, "%.0f", 0);
+
+    float s0[ERRP_N_CH] = {0}, g0[3] = {0};
+    errp_ring_put(&ring, t0 + 10, s0, g0, ERRP_SF_GAP);
+    for (uint32_t k = t0 + 11; k < t0 + ERRP_POST + 11; k++) errp_ring_put(&ring, k, s0, g0, 0);
+    st = errp_epoch_cut(&ring, t0 + 11, win, &info);
+    check("ring: GAP dentro de la ventana se propaga en flags", st == ERRP_EPOCH_OK && (info.flags_or & ERRP_SF_GAP),
+          "%.0f", info.flags_or);
 
     // IIR con offset DC grande y estado estacionario inicial
     errp_iir_t f;
     errp_iir_reset(&f, ERRP_GOLDEN_IIR_X[0]);
     double ierr = 0;
     for (int i = 0; i < ERRP_GOLDEN_IIR_LEN; i++) {
-        float y = errp_iir_step(&f, ERRP_GOLDEN_IIR_X[i]);
-        ierr = fmax(ierr, fabs(y - ERRP_GOLDEN_IIR_Y[i]));
+        ierr = fmax(ierr, fabs(errp_iir_step(&f, ERRP_GOLDEN_IIR_X[i]) - ERRP_GOLDEN_IIR_Y[i]));
     }
-    check("IIR vs scipy sosfilt, err máx µV (< 0.01)", ierr < 0.01, "%.2e", ierr);
+    check("IIR vs scipy sosfilt, µV (< 0.01)", ierr < 0.01, "%.2e", ierr);
 
-    // Percentil como numpy (interpolación lineal)
     float v[] = {5, 1, 4, 2, 3};
     float p = errp_percentile(v, 5, 90.0f);
-    check("percentil p90 de 1..5 == 4.6", fabsf(p - 4.6f) < 1e-5f, "%.4f", p);
+    check("percentil p90 de 1..5 == 4.6 (numpy)", fabsf(p - 4.6f) < 1e-5f, "%.4f", p);
 
-    // Máquina de alertas
     errp_alert_t a;
     errp_alert_init(&a, 1.0f, 2.0f, 3.0f);
     int l1 = errp_alert_score(&a, 1.5f);
     int l2 = errp_alert_score(&a, 2.5f);
-    int l3 = errp_alert_score(&a, 2.5f);  // 2 seguidos > T2 -> 3
+    int l3 = errp_alert_score(&a, 2.5f);  // 2 seguidas > T2 -> 3
     int l4 = errp_alert_score(&a, 0.5f);
     errp_alert_rejected(&a);
     errp_alert_rejected(&a);
-    int l5 = errp_alert_rejected(&a);     // 3 rechazados -> 2
+    int l5 = errp_alert_rejected(&a);     // 3 rechazadas -> 2
     int l6 = errp_alert_score(&a, 3.5f);
     check("alertas 1,2,3,0, rechazos->2, >T3->3",
           l1 == 1 && l2 == 2 && l3 == 3 && l4 == 0 && l5 == 2 && l6 == 3, "%.0f", 0);

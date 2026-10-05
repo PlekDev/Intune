@@ -86,11 +86,13 @@ def main():
 
     meta = json.loads(META_PATH.read_text())
     model = keras.models.load_model(MODEL_PATH)
-    s = load_splits(Path(meta["data"]))
-    mean, std = np.float32(meta["mean"]), np.float32(meta["std"])
-    x = s["d"]["X"]
-    e_rep = ep.to_model(ep.normalize(ep.preprocess(x[s["train"][:args.n_rep]]), mean, std))
-    e_test = ep.to_model(ep.normalize(ep.preprocess(x[s["test"]]), mean, std))
+    _, train, _, s_test, test_idx, _ = load_splits(meta["data"], meta["split"]["test_session"])
+    rng = np.random.default_rng(0)
+    rep_idx = rng.permutation(len(train))[:args.n_rep]
+    e_rep = ep.to_model(train.z[rep_idx])
+    # Test: acciones evaluadas no rechazadas (correctas y errores) + calibración de la sesión
+    idx = np.concatenate([np.flatnonzero(s_test.cal_mask), test_idx[~s_test.rejected[test_idx]]])
+    e_test = ep.to_model(s_test.z(idx))
 
     tflite = convert(model, e_rep)
     TFLITE_PATH.write_bytes(tflite)

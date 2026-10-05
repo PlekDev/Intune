@@ -1,15 +1,18 @@
 """Baseline LDA del Detector (C2): número de comparación y scorer de respaldo.
 
-    uv run --project ml/autoencoder ml/autoencoder/baseline_lda.py --data <epochs.npz>
+    uv run --project ml/autoencoder ml/autoencoder/baseline_lda.py [sesiones.npz | carpeta ...]
+        [--test-session NOMBRE]
 
-Features: epoch a 250 Hz con baseline [-200, 0) ms restado, promedio de cada
-canal en 8 bins entre 150 y 700 ms -> 64 valores (canal mayor, bin menor), en
-µV (no depende de la normalización de calibración).
-Modelo: LDA con shrinkage (Ledoit-Wolf), error vs correcto, entrenado con
-train + val del split cronológico y evaluado en test.
-Exporta models/lda.json con w[64] y b: score = w · f + b (> 0 => más parecido
-a error). En el S3 corre detrás de la misma lógica de alertas, con umbrales por
-percentiles de los correctos de calibración.
+Features (CLAUDE.md): media de cada canal en 8 bins entre 150 y 700 ms -> 64 valores
+(canal mayor, bin menor), sobre X [8, 40] de C4 en µV (baseline restado, 50 Hz; la
+muestra j cubre [20 j, 20 j + 20) ms). Los bordes redondean 150-700 ms a la rejilla
+de 20 ms: j = 8, 11, 14, 18, 21, 25, 28, 32, 35 (160-700 ms). No depende de la
+normalización de calibración.
+Modelo: LDA con shrinkage (Ledoit-Wolf), error vs correcto, entrenado con las
+épocas limpias (y = 0/1) de las sesiones que no son de test; evaluado en la sesión
+de test (sin calibración). Umbrales T1-T3 = p90/p97/p99 de los scores de las épocas
+de calibración de la sesión de test, como en el S3.
+Exporta models/lda.json con w[64] y b: score = w · f + b.
 """
 import argparse
 import json
@@ -24,60 +27,71 @@ AE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(AE_DIR))
 import errp_pipeline as ep  # noqa: E402
 
-DEFAULT_DATA = AE_DIR.parent / "data" / "epochs.npz"
 OUT_PATH = AE_DIR / "models" / "lda.json"
 BIN_MS = (150, 700)
 N_BINS = 8
-# Bordes en muestras a 250 Hz desde t = 0 (el S3 usa exactamente estos)
-BIN_EDGES = np.round(np.linspace(BIN_MS[0], BIN_MS[1], N_BINS + 1) * ep.FS / 1000).astype(int)
+BIN_EDGES = np.round(np.linspace(BIN_MS[0], BIN_MS[1], N_BINS + 1) / (1000 / 50)).astype(int)  # muestras a 50 Hz
+PERCENTILES = {"T1": 90.0, "T2": 97.0, "T3": 99.0}
 
 
 def features(x: np.ndarray) -> np.ndarray:
-    """[n, 8, 260] µV -> [n, 64]."""
-    bc = ep.baseline_corrected(x)
-    f = np.stack([bc[:, :, a:b].mean(axis=-1) for a, b in zip(BIN_EDGES[:-1], BIN_EDGES[1:])], axis=-1)
+    """X [n, 8, 40] µV -> [n, 64]."""
+    f = np.stack([x[:, :, a:b].mean(axis=-1) for a, b in zip(BIN_EDGES[:-1], BIN_EDGES[1:])], axis=-1)
     return f.reshape(len(x), -1).astype(np.float32)
+
+
+def labeled_clean(s: ep.Session, idx=None) -> np.ndarray:
+    m = (s.y >= 0) & ~s.rejected
+    return np.flatnonzero(m) if idx is None else idx[m[idx]]
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--data", type=Path, default=DEFAULT_DATA)
+    ap.add_argument("data", nargs="*", type=Path)
+    ap.add_argument("--test-session")
     ap.add_argument("--out", type=Path, default=OUT_PATH)
     args = ap.parse_args()
 
-    d = ep.load_epochs(args.data)
-    ok = ep.gate(d)
-    tr, va, te = ep.chrono_split(len(d["X"]))
-    fit_idx = np.concatenate([tr, va])
-    fit_idx, te = fit_idx[ok[fit_idx]], te[ok[te]]
-    f = features(d["X"])
-    y = d["y"]
+    sessions = ep.load_sessions(args.data)
+    _, _, s_test, test_idx, note = ep.split_sessions(sessions, args.test_session)
+    if len(sessions) >= 3:
+        fit = [(s, labeled_clean(s)) for s in sessions if s is not s_test]
+    else:  # sin split por sesión: entrenar con lo que no es test de cada sesión
+        fit = [(s, labeled_clean(s, np.setdiff1d(np.arange(len(s.y)), test_idx))) for s in sessions]
+    f_fit = np.concatenate([features(s.X[i]) for s, i in fit])
+    y_fit = np.concatenate([s.y[i] for s, i in fit])
 
-    lda = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto")
-    lda.fit(f[fit_idx], y[fit_idx])
+    lda = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto").fit(f_fit, y_fit)
     w = lda.coef_[0].astype(np.float32)
     b = float(lda.intercept_[0])
-    s_te = f[te] @ w + b
-    auc = float(roc_auc_score(y[te], s_te))
-    thr = {k: float(np.percentile(s_te[y[te] == 0], q)) for k, q in {"T1": 90, "T2": 97, "T3": 99}.items()}
-    det = {k: float((s_te[y[te] == 1] > v).mean()) for k, v in thr.items()}
+
+    te = labeled_clean(s_test, test_idx)
+    s_te = features(s_test.X[te]) @ w + b
+    y_te = s_test.y[te]
+    s_cal = features(s_test.X[s_test.cal_mask]) @ w + b
+    thr = {k: float(np.percentile(s_cal, q)) for k, q in PERCENTILES.items()}
+    auc = float(roc_auc_score(y_te, s_te))
+    det = {k: float((s_te[y_te == 1] > v).mean()) for k, v in thr.items()}
+    fa = {k: float((s_te[y_te == 0] > v).mean()) for k, v in thr.items()}
+    det_at_1pct = float((s_te[y_te == 1] > np.percentile(s_te[y_te == 0], 99)).mean())
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps({
         "model": "shrinkage LDA (lsqr, Ledoit-Wolf)",
         "features": {"layout": "canal mayor, bin menor", "channels": ep.CHANNELS,
                      "bin_ms": list(BIN_MS), "n_bins": N_BINS,
-                     "bin_edges_samples_250hz": BIN_EDGES.tolist(),
-                     "units": "µV, baseline [-200, 0) ms restado"},
+                     "bin_edges_samples_50hz": BIN_EDGES.tolist(),
+                     "input": "X [8, 40] µV de C4 (baseline restado, 50 Hz)"},
         "w": w.tolist(), "b": b, "score": "w · f + b",
-        "thresholds_offline": thr,
-        "evaluation": {"auc": auc, "n_fit": int(len(fit_idx)), "n_test": int(len(te)),
-                       "detection_rate_at": det},
-        "data": str(args.data),
+        "thresholds_test_calibration": thr,
+        "evaluation": {"auc": auc, "detection_at_1pct_fa": det_at_1pct, "detection_at": det,
+                       "false_alarm_at": fa, "n_fit": int(len(y_fit)), "n_test": int(len(te)),
+                       "test_session": s_test.name, "split": note},
     }, indent=2, ensure_ascii=False) + "\n")
-    print(f"LDA: fit {len(fit_idx)} epochs, test {len(te)} ({y[te].mean():.0%} error)  AUC {auc:.3f}")
-    print("detección de errores en test con umbrales p90/p97/p99 de correctos: "
-          + "  ".join(f"{k} {v:.1%}" for k, v in det.items()))
+    print(f"LDA: fit {len(y_fit)} épocas ({y_fit.mean():.0%} error), test {s_test.name} {len(te)} épocas  "
+          f"AUC {auc:.3f}  detección @1% FA {det_at_1pct:.1%}")
+    print("con umbrales de calibración: " + "  ".join(
+        f"{k} det {det[k]:.1%} / FA {fa[k]:.1%}" for k in thr))
     print(f"guardado {args.out}")
 
 
