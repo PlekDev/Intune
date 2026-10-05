@@ -1,0 +1,15 @@
+menu "INTUNE arm supervisor"
+
+config ARM_AP_SSID
+    string "SSID del AP del RoArm-M2-S (para encontrar su canal y MAC)"
+    default "RoArm-M2"
+
+config ARM_ESPNOW_CMD
+    int "Campo cmd por defecto (1 = JSON en callback Wi-Fi del brazo, 2 = JSON en loop())"
+    range 1 2
+    default 2
+    help
+        Con 1 el brazo ejecuta el JSON dentro del callback de Wi-Fi, en paralelo con loop(),
+        que también usa el bus de servos: riesgo de colisiones. 2 lo ejecuta en loop().
+
+endmenu
