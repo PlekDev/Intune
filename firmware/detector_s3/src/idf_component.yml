@@ -1,0 +1,4 @@
+## Dependencias del componente principal (gestor de componentes de ESP-IDF)
+dependencies:
+  idf: ">=5.1"
+  espressif/esp-tflite-micro: "^1.4.1"
