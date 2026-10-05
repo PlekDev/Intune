@@ -170,19 +170,18 @@ def go(sup, pose, label, vel, pulse=False):
     print(f'{label}: real {fmt(real) if real else "(sin lectura)"}{err}{pulse_txt}', flush=True)
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--a', type=parse_pose, default=(-30.0, 0.0, 90.0, 180.0), help='grados: base,hombro,codo,pinza')
-    ap.add_argument('--b', type=parse_pose, default=(30.0, 10.0, 100.0, 180.0), help='grados: base,hombro,codo,pinza')
-    ap.add_argument('--reps', type=int, default=0, help='idas y vueltas A->B->A; 0 = sin fin (por defecto)')
+def add_common_args(ap):
+    ap.add_argument('--reps', type=int, default=0, help='vueltas completas; 0 = sin fin (por defecto)')
     ap.add_argument('--vel', type=float, default=20.0, help='velocidad máxima por articulación, °/s (máx 57)')
-    ap.add_argument('--pausa', type=float, default=1.0, help='segundos quieto en A y en B')
+    ap.add_argument('--pausa', type=float, default=1.0, help='segundos quieto en cada punto')
     ap.add_argument('--sin-pulso', action='store_true', help='mover sin pulso de sync')
     ap.add_argument('-v', '--verbose', action='store_true', help='mostrar el log del supervisor')
     ap.add_argument('-p', '--port', help='puerto del supervisor (p. ej. /dev/ttyACM0, COM5); por defecto lo busca')
-    a = ap.parse_args()
-    a.vel = max(1.0, min(a.vel, 57.0))
 
+
+def run(points, a):
+    """points: lista de (nombre, pose en grados). Conecta, hace home y recorre los puntos en ciclo."""
+    a.vel = max(1.0, min(a.vel, 57.0))
     port = a.port or find_port()
     print(f'Supervisor en {port}. Reiniciándolo...', flush=True)
     sup = Sup(port, a.verbose)
@@ -207,16 +206,18 @@ def main():
         if not m or m.group(1):
             raise SystemExit('home no terminó' + (f': {m.group(1)}' if m else '') + '\n  ' + '\n  '.join(sup.tail(start)))
 
-        reps = f'{a.reps} idas y vueltas' if a.reps > 0 else 'sin fin'
-        print(f'\nA = {fmt(a.a)}\nB = {fmt(a.b)}\n{reps} a {a.vel:.0f}°/s, pausa {a.pausa} s'
+        reps = f'{a.reps} vueltas' if a.reps > 0 else 'sin fin'
+        print()
+        for name, pose in points:
+            print(f'{name} = {fmt(pose)}')
+        print(f'{" -> ".join(n for n, _ in points)} -> {points[0][0]} ..., {reps} a {a.vel:.0f}°/s, pausa {a.pausa} s'
               f'{", sin pulso" if a.sin_pulso else ", con pulso de sync"}.  Ctrl+C para detener.\n', flush=True)
         i = 0
         while a.reps <= 0 or i < a.reps:
             i += 1
-            go(sup, a.a, f'[{i}] A', a.vel, not a.sin_pulso)
-            time.sleep(a.pausa)
-            go(sup, a.b, f'[{i}] B', a.vel, not a.sin_pulso)
-            time.sleep(a.pausa)
+            for name, pose in points:
+                go(sup, pose, f'[{i}] {name}', a.vel, not a.sin_pulso)
+                time.sleep(a.pausa)
 
         print('\nVolviendo a la postura de arranque...', flush=True)
         go(sup, INIT, 'inicio', a.vel)
@@ -232,6 +233,15 @@ def main():
         except Exception:
             pass
         print('Brazo retenido y quieto (con torque).')
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--a', type=parse_pose, default=(-30.0, 0.0, 90.0, 180.0), help='grados: base,hombro,codo,pinza')
+    ap.add_argument('--b', type=parse_pose, default=(30.0, 10.0, 100.0, 180.0), help='grados: base,hombro,codo,pinza')
+    add_common_args(ap)
+    a = ap.parse_args()
+    run([('A', a.a), ('B', a.b)], a)
 
 
 if __name__ == '__main__':

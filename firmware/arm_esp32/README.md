@@ -30,6 +30,18 @@ python firmware/arm_esp32/tools/move_ab.py --help
 
 Límites: base ±91°, hombro −34..51°, codo 34..149°, pinza 92..183°. Velocidad máx. 57 °/s.
 
+### Tres puntos (A → B → C → A …), movimiento más amplio
+
+```bash
+python firmware/arm_esp32/tools/move_abc.py
+python firmware/arm_esp32/tools/move_abc.py --vel 30 --pausa 1.5
+python firmware/arm_esp32/tools/move_abc.py --a -70,0,90,180 --b 0,25,115,130 --c 70,-10,80,180
+```
+
+Por defecto: A = `-60,0,90,180` (girado a un lado), B = `0,20,110,130` (centro, inclinado hacia
+delante, pinza abierta), C = `60,-10,80,180` (girado al otro lado, levantado). Mismas opciones y
+mismo Ctrl+C que `move_ab.py` (y necesita ese archivo al lado: comparten la lógica).
+
 Si falla:
 - *No encuentro el supervisor*: cable USB de datos, o indica el puerto con `--port`
   (Linux `/dev/ttyACM0` o `/dev/ttyUSB0`, macOS `/dev/cu.usbserial-…`/`/dev/cu.wchusbserial…`, Windows `COMx`).
