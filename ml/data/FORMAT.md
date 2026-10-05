@@ -42,7 +42,7 @@ Para cada fila de `events.csv` (una acción):
 | `counter` | `c0` no existe en `eeg.csv` o el contador no es continuo en la ventana (X = 0 si no hay ventana) | — |
 | `flags` | alguna muestra de la ventana con HELD, GAP, SETTLING o FILTER_RESET | — |
 | `unfiltered` | alguna muestra con flag UNFILTERED (cadena distinta de la del S3) | — |
-| `saturated` | algún `|r_*| ≥ 740 000 µV` en la ventana (tope del ADC ≈ 750 000). Solo offline; el S3 lo ve como amplitud enorme | `adc_sat_uv` |
+| `saturated` | algún `|r_*| ≥ 740 000 µV` en la ventana (tope del ADC ≈ 750 000). Solo offline y solo si `has_raw`; el S3 lo ve como amplitud enorme | `adc_sat_uv` |
 | `flat` | algún canal de `X[k]` con desviación estándar < 0.05 µV | `flat_std_uv` |
 | `amplitude` | `max |X[k]| > GATE_UV` (tras IIR, baseline y diezmado; 100 µV) | `gate_uv` |
 | `gyro` | rango pico a pico por eje de `gyr_*` en la ventana, máximo de los 3 ejes, `> GATE_GYRO` °/s. No depende del sesgo del giroscopio y es fácil de calcular en el S3 | `gate_gyro` |
@@ -70,6 +70,7 @@ Se carga con `np.load(path, allow_pickle=False)`. Las cadenas son arreglos unico
 | `max_abs_uv` | float32 `[n]` | `max |X|`, para afinar `GATE_UV` (NaN si no hay ventana) |
 | `gyro_metric` | float32 `[n]` | métrica de gyro de §3 (NaN si no hay ventana) |
 | `norm_mean`, `norm_std` | float32 `[8]` | media/desv. por canal de las épocas de calibración (µV) |
+| `has_raw` | bool | `False` si `r_*` está vacío (puente sin EEG_RAW): entonces no se comprueba `saturated` |
 | `norm_valid` | bool | `False` si hubo < 20 épocas de calibración (norm_* no fiables) |
 | `n_calibration` | int64 | número de épocas de calibración |
 | `ch_names` | str `[8]` | `Fz C3 Cz C4 Pz PO7 Oz PO8` |
@@ -161,5 +162,7 @@ Si C2 quiere jitter más fino, que lo pida y C4 exporta también la ventana de 2
 3. **`GATE_GYRO`** (30 °/s de partida) y **`EVENT_LATENCY_OFFSET`** (0): se fijan con datos reales y la prueba 10.
 4. **Errores en calibración**: el paradigma grabado mezcla errores desde el inicio; la calibración toma solo las
    primeras 80 correctas limpias. En vivo el S3 calibrará con acciones solo correctas.
-5. **Falta `tools/recording/record_errp.py`**: C1 no lo subió a `origin/c1_bridge`. Este contrato sigue el formato crudo del
-   prompt de C4; si el grabador real difiere (nombres de columnas, `meta.json`), se ajusta `build_dataset.py`.
+5. **`r_*` opcional**: `record_errp.py` solo llena `r_*` si el puente se compila con EEG_RAW. Para grabaciones de
+   entrenamiento conviene activarlo (también sirve para la prueba 7); sin él no hay comprobación de saturación del ADC.
+6. **Formato verificado contra `record_errp.py`** (origin/c1_bridge, commit `1150df6`): columnas de eeg/events/blocks/status y
+   claves de meta.json (`subject`, `filter`) coinciden. `--no-blocks` no crea `blocks.csv` y `--no-arm` etiqueta `manual`; ambos casos están soportados.

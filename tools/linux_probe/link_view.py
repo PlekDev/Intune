@@ -25,7 +25,7 @@ from pathlib import Path
 
 # ---- link_protocol.h ----
 SYNC = b"\xA5\x5A"
-T_EEG, T_STATUS, T_EEG_RAW = 0x01, 0x02, 0x03
+T_EEG, T_STATUS, T_EEG_RAW, T_EVENT = 0x01, 0x02, 0x03, 0x04
 F_HELD, F_GAP, F_SETTLING, F_RESET, F_SESSION, F_UNFILT = 0x01, 0x02, 0x04, 0x08, 0x10, 0x20
 F_REJECT = F_HELD | F_GAP | F_SETTLING  # igual que LINK_F_REJECT
 FLAG_NAMES = {F_HELD: "HELD", F_GAP: "GAP", F_SETTLING: "SETTLING", F_RESET: "RESET",
@@ -34,6 +34,8 @@ EEG_FMT = "<IB8f3h3h"  # 49 B: counter, flags, 8 µV, acc[3], gyr[3]
 EEG_LEN = 49
 ACC_SCALE, GYR_SCALE = 1 / 4096.0, 1 / 32.8
 STATUS_FMT = "<BBHIIII"  # 20 B
+EVENT_FMT = "<IIhB"  # 11 B: seq, counter, offset_us, flags
+EVT_NO_T0, EVT_OVERLAP = 0x01, 0x02
 STATES = {0: "IDLE", 1: "CONNECTING", 2: "STREAMING"}
 CH = ["Fz", "C3", "Cz", "C4", "Pz", "PO7", "Oz", "PO8"]
 FS = 250.0
@@ -103,17 +105,38 @@ def open_port(port):
 
 
 def samples(port, duration=None):
-    """Genera (t, kind, payload_tuple). kind: 'eeg' | 'raw' | 'status'."""
+    """Genera (t, kind, payload_tuple). kind: 'eeg' | 'raw' | 'status' | 'event'."""
+    import serial
+
     s = open_port(port)
     rx = LinkRx()
     t_end = time.time() + duration if duration else None
     try:
         while not t_end or time.time() < t_end:
-            data = s.read(4096)
+            try:
+                data = s.read(4096)
+            except serial.SerialException as e:
+                # Al abrir, el CH340 reinicia la placa y a veces da una lectura vacía;
+                # también si se desconecta el USB. Reabrir hasta que vuelva.
+                print(f"[link] {e}; reabriendo", file=sys.stderr)
+                try:
+                    s.close()
+                except Exception:
+                    pass
+                while True:
+                    time.sleep(1.0)
+                    try:
+                        s = open_port(port)
+                        break
+                    except (Exception, SystemExit):  # open_port sale si no hay /dev/ttyUSB*
+                        pass
+                continue
             t = time.time()
             for typ, pl in rx.feed(data):
                 if typ in (T_EEG, T_EEG_RAW) and len(pl) == EEG_LEN:
                     yield t, "eeg" if typ == T_EEG else "raw", struct.unpack(EEG_FMT, pl)
+                elif typ == T_EVENT and len(pl) == 11:
+                    yield t, "event", struct.unpack(EVENT_FMT, pl)
                 elif typ == T_STATUS and len(pl) == 20:
                     yield t, "status", struct.unpack(STATUS_FMT, pl) + (rx.crc_errors,)
     finally:
@@ -237,13 +260,20 @@ def cmd_check(a):
     if not starts:
         sys.exit("no hay ningún FILTER_RESET en la grabación")
     starts.append(len(cnt))
-    worst = 0.0
+    worst = worst_all = 0.0
     for s0, s1 in zip(starts[:-1], starts[1:]):
         x = raw[s0:s1]
         y = np.empty_like(x)
         for ch in range(8):
             y[:, ch], _ = signal.sosfilt(sos, x[:, ch], zi=zi1 * x[0, ch])
-        err = np.abs(y - filt[s0:s1]).max(axis=0)
+        d = np.abs(y - filt[s0:s1])
+        worst_all = max(worst_all, d.max())
+        # Criterio "after settling": el transitorio inicial puede valer 1e5 µV y ahí el
+        # redondeo a float32 de la trama ya es ~0.01 µV
+        settled = (flags[s0:s1] & F_SETTLING) == 0
+        if not settled.any():
+            continue
+        err = d[settled].max(axis=0)
         worst = max(worst, err.max())
         print(f"segmento cnt {cnt[s0]}..{cnt[s1 - 1]} ({s1 - s0} muestras): error máx por canal µV = "
               + " ".join(f"{c}={e:.4f}" for c, e in zip(CH, err)))
@@ -251,7 +281,8 @@ def cmd_check(a):
     print(f"muestras={len(cnt)} HELD={held} GAP={int((flags & F_GAP).astype(bool).sum())} "
           f"reinicios={len(starts) - 1}")
     verdict = "PASA" if worst < 0.01 else "NO PASA"
-    print(f"prueba 7: error máx {worst:.5f} µV (criterio < 0.01 µV) -> {verdict}")
+    print(f"error máx incluyendo SETTLING: {worst_all:.5f} µV (solo informativo)")
+    print(f"prueba 7: error máx tras SETTLING {worst:.5f} µV (criterio < 0.01 µV) -> {verdict}")
 
 
 def cmd_live(a):

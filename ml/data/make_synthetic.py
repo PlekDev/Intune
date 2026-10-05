@@ -232,11 +232,12 @@ def main():
     pd.DataFrame([dict(block=b, counter_start=s + 1, counter_end=e) for b, s, e in blocks]) \
         .to_csv(d / "blocks.csv", index=False)
     secs = np.arange(0, int(n / FS), 1)
-    pd.DataFrame(dict(t=t0 + secs, state=2, lost=0, reconnects=0, battery=80)).to_csv(d / "status.csv", index=False)
+    pd.DataFrame(dict(t=t0 + secs, state="STREAMING", battery=80, proc_us_max=300, frames=secs * FS, gaps=0,
+                      lost=0, reconnects=0, crc_pc=0)).to_csv(d / "status.csv", index=False)
     (d / "meta.json").write_text(json.dumps(dict(
-        sujeto=a.subject, semilla=a.seed, sintetico=True, filtro=FILTER_TXT,
-        parametros=dict(actions=a.actions, error_rate=a.error_rate, latency_ms=a.latency_ms, errp_uv=a.errp_uv),
-        resumen=dict(filas=int(len(df)), acciones=len(events))), indent=2, ensure_ascii=False), encoding="utf-8")
+        subject=a.subject, seed=a.seed, synthetic=True, filter=FILTER_TXT, channels=CH, fs=FS,
+        parameters=dict(actions=a.actions, error_rate=a.error_rate, latency_ms=a.latency_ms, errp_uv=a.errp_uv),
+        samples=int(len(df)), n_events=len(events)), indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"sesion sintetica en {d}  ({len(df)} muestras, {len(events)} eventos, "
           f"{labels.count('error')} errores de {a.actions})")
 

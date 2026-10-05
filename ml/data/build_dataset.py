@@ -105,6 +105,7 @@ def build_session(path: Path, latency_ms=EVENT_LATENCY_OFFSET_MS, gate_uv=GATE_U
     gyr = eeg[["gyr_x", "gyr_y", "gyr_z"]].to_numpy(np.float64)
     t_arr = eeg["t"].to_numpy(np.float64)
     n_rows = len(eeg)
+    has_raw = bool(np.isfinite(r).any())   # r_* solo existe si el puente tiene EEG_RAW (Kconfig)
 
     lat_samples = int(round(latency_ms / SAMPLE_MS))
     n = len(ev)
@@ -146,7 +147,7 @@ def build_session(path: Path, latency_ms=EVENT_LATENCY_OFFSET_MS, gate_uv=GATE_U
             rs.append("flags")
         if np.any(flags[a:b] & F_UNFILTERED):
             rs.append("unfiltered")
-        if np.any(np.abs(r[a:b]) >= ADC_SAT_UV):
+        if has_raw and np.nanmax(np.abs(r[a:b])) >= ADC_SAT_UV:
             rs.append("saturated")
         win = f[a:b]                                       # [250, 8] uV, ya filtrado por el puente
         win = win - win[:PRE_SAMPLES].mean(axis=0)         # baseline [-200, 0) ms
@@ -203,6 +204,7 @@ def build_session(path: Path, latency_ms=EVENT_LATENCY_OFFSET_MS, gate_uv=GATE_U
         norm_mean=mean.astype(np.float32),
         norm_std=std.astype(np.float32),
         norm_valid=np.bool_(norm_valid),
+        has_raw=np.bool_(has_raw),
         n_calibration=np.int64(len(cal_idx)),
         ch_names=np.array(CH),
         subject=np.array(subject),

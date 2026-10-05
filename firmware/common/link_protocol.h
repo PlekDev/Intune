@@ -14,6 +14,9 @@
 // STATUS: 1/s siempre, también sin streaming; es el heartbeat del puente.
 // EEG_RAW (solo depuración, Kconfig): mismo payload que EEG pero en µV sin filtrar,
 // enviado justo después de cada EEG. Sirve para comparar el IIR con scipy (prueba 7).
+// EVENT: flanco de subida del pulso de sincronía del brazo, si llega también al puente
+// (Kconfig BRIDGE_SYNC_GPIO). Lo usa la grabación de datos (tools/recording/) mientras
+// no existe el S3. Ver "Pulso de sincronía" más abajo.
 // El S3 debe ignorar tipos que no conoce.
 //
 // Huecos (regla dura 3): nunca se interpola.
@@ -42,6 +45,7 @@ enum {
     LINK_TYPE_EEG    = 0x01,
     LINK_TYPE_STATUS = 0x02,
     LINK_TYPE_EEG_RAW = 0x03,  // depuración
+    LINK_TYPE_EVENT  = 0x04,
 };
 
 // Flags por muestra (LINK_TYPE_EEG)
@@ -80,7 +84,23 @@ typedef struct __attribute__((packed)) {
     uint32_t reconnects;
 } link_status_t;                 // 20 B
 
+// Pulso de sincronía (regla dura 4). Mismo método que debe usar el S3:
+//   t0 = envolvente inferior de (t_llegada - contador * 4000 us), mínimo móvil
+//   muestra del flanco = (t_flanco - t0) / 4000 us, redondeado
+// t0 corresponde a la latencia mínima BT; el resto (constante) es EVENT_LATENCY_OFFSET
+// y se mide en la prueba 10. counter puede ir por delante de la última muestra recibida.
+#define LINK_EVT_F_NO_T0   0x01  // sin streaming o sin t0 todavía: counter no es válido
+#define LINK_EVT_F_OVERLAP 0x02  // menos de 1.0 s desde el flanco anterior
+
+typedef struct __attribute__((packed)) {
+    uint32_t seq;                // nº de flanco desde el arranque del puente (detecta pérdidas)
+    uint32_t counter;            // muestra Unicorn estimada en el flanco
+    int16_t  offset_us;          // t_flanco - (t0 + counter * 4000), en [-2000, 2000]
+    uint8_t  flags;              // LINK_EVT_F_*
+} link_event_t;                  // 11 B
+
 _Static_assert(sizeof(float) == 4, "float de 32 bits");
+_Static_assert(sizeof(link_event_t) == 11, "link_event_t");
 _Static_assert(sizeof(link_eeg_t) == 49, "link_eeg_t");
 _Static_assert(sizeof(link_status_t) == 20, "link_status_t");
 _Static_assert(sizeof(link_eeg_t) <= LINK_MAX_PAYLOAD, "payload EEG");
@@ -123,6 +143,11 @@ static inline size_t link_encode_eeg(uint8_t *out, const link_eeg_t *s)
 static inline size_t link_encode_eeg_raw(uint8_t *out, const link_eeg_t *s)
 {
     return link_encode(out, LINK_TYPE_EEG_RAW, s, sizeof(*s));
+}
+
+static inline size_t link_encode_event(uint8_t *out, const link_event_t *e)
+{
+    return link_encode(out, LINK_TYPE_EVENT, e, sizeof(*e));
 }
 
 static inline size_t link_encode_status(uint8_t *out, const link_status_t *s)
