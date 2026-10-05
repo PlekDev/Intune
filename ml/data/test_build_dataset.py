@@ -1,4 +1,4 @@
-"""Pruebas de build_dataset.py con una sesion sintetica corta. Correr: pytest ml/data -q"""
+"""Pruebas de build_dataset.py con una sesion sintetica corta. Correr:pytest ml/data -q"""
 import subprocess
 import sys
 from pathlib import Path
