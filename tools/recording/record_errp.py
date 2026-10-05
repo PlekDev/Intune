@@ -25,7 +25,9 @@ firmware/arm_esp32/tools/move_ab.py): al abrir se reinicia; "s3 0" simula el hea
 (sin él el brazo no se mueve), "vel", "home"; cada acción es "act <b> <s> <e> <h> <0|1>" en rad.
 Inicio = línea "actions: PULSO acción"; fin = "motion: MOVING -> IDLE"; fallo = "... rechazado"
 o "SIN pulso". Al terminar: "stop" y "s3 off" (el brazo queda quieto con torque).
-La PC deja >= --isi s entre inicios (def. 3-4 s; CLAUDE.md: >= 1.5 s y acciones de ~2 s).
+v3.1: el reposo se mide desde que el brazo se DETIENE (--rest, def. 1.5-2.5 s) y siempre hay >= 1.5 s
+entre inicios (CLAUDE.md). La primera correcta tras un error (el regreso al punto saltado) se etiqueta
+"recovery" y no entra al dataset. Con --check-every hay un descanso (Enter) al final de cada bloque.
 
 Salida: ml/data/raw/<fecha>_<sujeto>/
     eeg.csv     igual que link_view.py record (contador, flags, f_*, acc, gyr, r_*)
@@ -75,6 +77,33 @@ def make_schedule(n, p_error, rng):
         return lab
 
 
+class Publisher:
+    """Copia por UDP a localhost lo que pasa en la grabación, para tools/recording/live_view.py.
+    sendto no bloquea y los errores se ignoran: si no hay visor, no cambia nada."""
+
+    def __init__(self, port):
+        import socket
+
+        self.addr = ("127.0.0.1", port)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if port else None
+        self.buf = []
+
+    def send(self, msg):
+        if self.sock:
+            with contextlib.suppress(OSError):
+                self.sock.sendto(json.dumps(msg, separators=(",", ":")).encode(), self.addr)
+
+    def sample(self, counter, flags, f):
+        if self.sock:
+            self.buf.append([counter, flags] + [round(v, 2) for v in f])
+            if len(self.buf) >= 20:  # ~80 ms por paquete
+                self.send({"k": "eeg", "s": self.buf})
+                self.buf = []
+
+
+PUB = Publisher(0)  # se reemplaza en main() según --ui-port
+
+
 class Bridge(threading.Thread):
     """Lee el stream del puente, escribe eeg.csv y status.csv, y pasa los EVENT por cola."""
 
@@ -111,6 +140,7 @@ class Bridge(threading.Thread):
                 self.last_counter = p[0]
                 self.n += 1
                 self.recent.append((t, p[1], p[2:10]))
+                PUB.sample(p[0], p[1], p[2:10])
                 if p[1] & L.F_SETTLING:
                     self.settled_since = None
                 elif self.settled_since is None:
@@ -126,6 +156,8 @@ class Bridge(threading.Thread):
                     print("\n!! el puente se reinició (contadores a cero)", file=sys.stderr)
                 self.last_status = p
                 self.state = L.STATES.get(p[0], p[0])
+                PUB.send({"k": "status", "state": self.state, "bat": p[1], "frames": p[3], "gaps": p[4],
+                          "lost": p[5], "reconn": p[6], "crc": p[7]})
                 self.ws.writerow([f"{t:.3f}", self.state, p[1], p[2], p[3], p[4], p[5], p[6], p[7]])
                 self._st.flush()
         self._eeg.close()
@@ -187,9 +219,13 @@ class Arm:
         if not self.sup.wait_for(r"arm_uart: enlace UART", 8, 0):  # desde la apertura del puerto
             sys.exit("el supervisor no arrancó o no tiene el firmware de INTUNE con enlace UART")
         time.sleep(1.0)
-        if self.sup.real_pose() is None:  # como move_ab.py: ¿responde el brazo por UART?
-            sys.exit("el brazo no responde por UART. ¿Está encendido y terminó de arrancar? Cables: "
-                     "pin 10 del brazo -> RX2/GPIO16, pin 8 -> TX2/GPIO17, GND -> GND del supervisor")
+        t_end = time.time() + 30  # el brazo tarda unos segundos en arrancar tras encenderlo
+        while self.sup.real_pose() is None:  # como move_ab.py: ¿responde el brazo por UART?
+            if time.time() > t_end:
+                sys.exit("el brazo no responde por UART tras 30 s. ¿Está encendido (con su fuente)? Cables: "
+                         "pin 10 del brazo -> RX2/GPIO16, pin 8 -> TX2/GPIO17, GND -> GND del supervisor")
+            print("Brazo: no responde todavía; esperando a que arranque (máx. 30 s)...", flush=True)
+            time.sleep(2.0)
         m0 = self.sup.mark()  # marcar ANTES de mandar: la respuesta puede llegar enseguida
         self.sup.cmd("s3 0")  # sin S3: simular el heartbeat en nivel 0 (si no, el brazo no se mueve)
         if not self.sup.wait_for(r"-> RUN", 2, m0):
@@ -201,6 +237,7 @@ class Arm:
         m = self.sup.wait_for(r"HOMING -> IDLE|home rechazado: (.*)", 15, m0)
         if not m or m.group(1):
             sys.exit("home no terminó" + (f": {m.group(1)}" if m else "") + "\n  " + "\n  ".join(self.sup.tail(m0)))
+        self.missed = False          # la acción anterior fue un error: la próxima correcta es un regreso
         self.idx = 0                 # postura del anillo donde "debería" estar el brazo
         self.cur = RING[0][1]        # postura real actual
         self._go(RING[0][1])  # postura inicial del anillo, sin pulso
@@ -218,7 +255,9 @@ class Arm:
 
     def act(self, err):
         """Lanza la acción. Correcta: siguiente postura del anillo (o la que se saltó en el error
-        anterior). Error: postura aleatoria fuera del umbral. Devuelve (nombre, postura en grados)."""
+        anterior). Error: postura aleatoria fuera del umbral. Devuelve (nombre, postura en grados,
+        regreso): regreso = es la primera correcta tras uno o más errores (vuelve al punto saltado; es
+        más larga y visualmente distinta: v3.1 la etiqueta "recovery" y la saca del dataset)."""
         nxt = (self.idx + 1) % len(RING)
         if err:
             pose = random_error_pose(self.rng, self.cur, RING[nxt][1])
@@ -226,10 +265,12 @@ class Arm:
         else:
             self.idx = nxt
             name, pose = RING[nxt]
+        recovery = (not err) and self.missed
+        self.missed = bool(err)
         self.cur = pose
         self.mark = self.sup.mark()
         self.sup.cmd(f"act {self._rad(pose)} {1 if err else 0}")
-        return name, pose
+        return name, pose, recovery
 
     def events(self):
         """Líneas nuevas del supervisor como (t, ONSET | DONE | ERR, texto)."""
@@ -284,6 +325,14 @@ def run_blocks(br, wb):
         print(f"  {name}: listo (cnt {c0}..{c1})          ")
 
 
+def pause(msg):
+    """input() que no falla sin teclado (stdin cerrado): entonces sigue sin esperar."""
+    try:
+        return input(msg)
+    except EOFError:
+        return ""
+
+
 def new_state(total):
     return {"next_id": 1, "total": total, "last_seq": None,
             "stats": {"ok": 0, "no_pulse": 0, "no_t0": 0, "overlap": 0, "arm_err": 0}}
@@ -301,17 +350,20 @@ def run_actions(a, br, arm, items, we, rng, st, rest_every=0):
         i = st["next_id"]
         st["next_id"] += 1
         if rest_every and j > 0 and j % rest_every == 0:
-            input(f"\nDescanso ({i - 1}/{n}). Enter para seguir... ")
+            pause(f"\nDescanso ({i - 1}/{n}). Enter para seguir... ")
         # vaciar eventos sueltos (rebotes, pulsos fuera de acción)
         while not br.events.empty():
             br.events.get_nowait()
         t_sent = time.time()
+        rest_before = t_sent - st["t_still"] if st.get("t_still") else None
         label = "manual" if arm is None else seg_label
-        target, pose = "", None
+        target, pose, recovery = "", None, False
         if arm is None:
             print(f"\nACCIÓN {i}/{n}: da un pulso en GPIO18 ahora", end="", flush=True)
         else:
-            target, pose = arm.act(err)
+            target, pose, recovery = arm.act(err)
+            if recovery and label == "correct":
+                label = "recovery"  # regreso al punto saltado: fuera del dataset (y = -1)
         t_onset = t_done = None
         evt = None
         arm_msg = ""
@@ -351,16 +403,24 @@ def run_actions(a, br, arm, items, we, rng, st, rest_every=0):
             print(f"\n!! saltaron flancos: seq {last_seq} -> {seq}", file=sys.stderr)
         if evt:
             last_seq = seq
+        PUB.send({"k": "act", "i": i, "n": n, "label": label, "status": status, "target": target,
+                  "counter": cnt if cnt != "" else None})
         we.writerow([i, label, f"{t_sent:.4f}", f"{t_onset:.4f}" if t_onset else "",
                      f"{t_done:.4f}" if t_done else "", seq, cnt, off, fl, status, arm_msg,
-                     target, " ".join(f"{x:g}" for x in pose) if pose else ""])
-        print(f"\r[{i:3d}/{n}] {label:7s} {target:9s} {status:8s} cnt={cnt}   "
+                     target, " ".join(f"{x:g}" for x in pose) if pose else "",
+                     f"{rest_before:.3f}" if rest_before is not None else ""])
+        print(f"\r[{i:3d}/{n}] {label:8s} {target:9s} {status:8s} cnt={cnt}   "
               + " ".join(f"{k}={v}" for k, v in stats.items()), end="", flush=True)
-        # >= isi entre inicios (desde el flanco si lo hubo)
         t_ref = evt[0] if evt else t_sent
-        wait = rng.uniform(*a.isi) - (time.time() - t_ref)
-        if t_done:
-            wait = max(wait, t_done + a.min_rest - time.time())  # siempre un rato quieto entre acciones
+        if arm is not None and t_done:
+            # v3.1: reposo medido desde que el brazo se DETIENE, igual para todas las acciones. Así la
+            # respuesta cerebral al frenado (~300-600 ms) nunca cae en la línea base [-200, 0] ms de la
+            # siguiente época, sea cual sea la duración del movimiento anterior.
+            wait = t_done + rng.uniform(*a.rest) - time.time()
+        else:
+            wait = rng.uniform(*a.isi) - (time.time() - t_ref)  # sin brazo: intervalo entre inicios
+        wait = max(wait, t_ref + 1.5 - time.time())  # CLAUDE.md: >= 1.5 s entre inicios
+        st["t_still"] = t_done
         if wait > 0:
             time.sleep(wait)
     print()
@@ -398,6 +458,8 @@ def check_quality(a, br, t0, t1, seg, n_act, lost0, block, attempt, wc):
           + (f"  (aviso, otros canales: {', '.join(warn_ch)})" if warn_ch else ""))
     wc.writerow([block, attempt, int(passed), f"{t0:.3f}", f"{t1:.3f}", seg["ok"], n_act, lost, f"{loss_pct:.3f}"]
                 + [f"{v:.2f}" for v in rstd])
+    PUB.send({"k": "check", "block": block, "try": attempt, "passed": bool(passed),
+              "rstd": [round(float(v), 2) if np.isfinite(v) else None for v in rstd], "max_uv": a.check_max_uv})
     return passed
 
 
@@ -405,6 +467,7 @@ def run_check(a, br, arm, we, rng, st, block, wc):
     """Prueba de calidad antes de un bloque del dataset; se repite si sale mal."""
     for attempt in range(1, a.check_max_tries + 1):
         print(f"\n--- prueba de señal antes del bloque {block} (intento {attempt}): {a.check_n} acciones sin errores")
+        PUB.send({"k": "phase", "text": f"prueba de señal antes del bloque {block} (intento {attempt})"})
         lost0 = br.last_status[5] if br.last_status else 0
         t0 = time.time()
         seg = run_actions(a, br, arm, [("check", 0)] * a.check_n, we, rng, st)
@@ -450,6 +513,12 @@ def main():
     ap.add_argument("--check-channels", default="Fz,Cz,C3,C4,Pz", type=lambda v: v.split(","),
                     help="canales que deben pasar la prueba")
     ap.add_argument("--check-max-tries", type=int, default=3)
+    ap.add_argument("--ui-port", type=int, default=47474,
+                    help="puerto UDP local para tools/recording/live_view.py (0 = no publicar)")
+    ap.add_argument("--rest", type=float, nargs=2, default=(1.5, 2.5), metavar=("MIN", "MAX"),
+                    help="s quieto desde que TERMINA un movimiento hasta que empieza el siguiente (def. 1.5-2.5)")
+    ap.add_argument("--no-block-rest", dest="block_rest", action="store_false",
+                    help="sin descanso (Enter) al terminar cada bloque de --check-every")
     ap.add_argument("--pulse-timeout", type=float, default=3.0, help="s para recibir el flanco")
     ap.add_argument("--action-timeout", type=float, default=10.0,
                     help="s tras el flanco para DONE (el regreso tras un error puede durar ~5 s)")
@@ -481,7 +550,10 @@ def main():
         "familiar": a.familiar, "check_every": a.check_every, "check_n": a.check_n,
         "check_max_uv": a.check_max_uv, "check_channels": a.check_channels,
         "paradigm": None if a.no_arm else {
-            "version": 2,
+            "version": "3.1",
+            "recovery": "la primera correcta tras un error (regreso al punto saltado) se etiqueta recovery "
+                        "y queda fuera del dataset",
+            "rest_after_done_s": list(a.rest),
             "rule": "correcta = siguiente postura del anillo (o la saltada por el error anterior); "
                     "error = postura aleatoria a >= err_min_dev_deg del destino correcto",
             "ring_deg": {name: list(pose) for name, pose in RING}, "vel_deg_s": a.vel,
@@ -494,6 +566,8 @@ def main():
     (outdir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
     print(f"Sesión: {outdir}")
 
+    global PUB
+    PUB = Publisher(a.ui_port)
     br = Bridge(a.bridge_port, outdir)
     br.start()
     arm = None if a.no_arm else Arm(a.arm_port, a.vel, a.arm_echo, seed)
@@ -515,14 +589,16 @@ def main():
             we = csv.writer(fe)
             we.writerow(["action_id", "label", "t_sent", "t_onset_arm", "t_done_arm",
                          "evt_seq", "evt_counter", "evt_offset_us", "evt_flags", "status", "arm_msg",
-                         "target", "pose_deg"])
+                         "target", "pose_deg", "rest_before_s"])
             n_extra = a.familiar + (a.check_n * -(-a.n_actions // a.check_every) if a.check_every else 0)
             st = new_state(a.n_actions + n_extra)
             stats = st["stats"]
             if a.familiar:
                 print(f"\n--- familiarización: {a.familiar} acciones sin errores (memoriza el recorrido)")
+                PUB.send({"k": "phase", "text": "familiarización"})
                 run_actions(a, br, arm, [("familiar", 0)] * a.familiar, we, rng, st)
                 print(f"--- pausa de {a.familiar_pause:.0f} s")
+                PUB.send({"k": "phase", "text": f"pausa de {a.familiar_pause:.0f} s"})
                 time.sleep(a.familiar_pause)
             items = [("error" if e else "correct", e) for e in labels]
             if a.check_every:
@@ -534,8 +610,14 @@ def main():
                         run_check(a, br, arm, we, rng, st, block, wc)
                         fc.flush()
                         print(f"\n--- bloque {block}: acciones {b0 + 1}-{min(b0 + a.check_every, a.n_actions)} del dataset")
+                        PUB.send({"k": "phase", "text": f"bloque {block} del dataset"})
                         run_actions(a, br, arm, items[b0:b0 + a.check_every], we, rng, st)
                         fe.flush()
+                        if a.block_rest and b0 + a.check_every < a.n_actions:
+                            PUB.send({"k": "phase", "text": f"DESCANSO tras el bloque {block} (Enter en la terminal)"})
+                            pause(f"\n=== DESCANSO tras el bloque {block} ({b0 + a.check_every}/{a.n_actions} del "
+                                  "dataset). Relájate, parpadea, muévete si quieres. Enter para seguir... ")
+                            st["t_still"] = None  # tras la pausa, el reposo previo no es comparable
             else:
                 run_actions(a, br, arm, items, we, rng, st, rest_every=a.rest_every)
     except KeyboardInterrupt:

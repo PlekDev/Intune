@@ -61,7 +61,7 @@ Se carga con `np.load(path, allow_pickle=False)`. Las cadenas son arreglos unico
 |---|---|---|
 | `X` | float32 `[n, 8, 40]` | µV sin normalizar (§2) |
 | `W` | float32 `[n, 8, 250]` | ventana f_* cruda [−200, +800) ms (tras el IIR del puente, sin baseline ni diezmado); ceros si no hubo ventana. Es la entrada `windows` de C2 |
-| `y` | int8 `[n]` | 0 correct, 1 error, −1 manual (label de events.csv) |
+| `y` | int8 `[n]` | 0 correct, 1 error, −1 cualquier otra label de events.csv: `manual` (banco), `familiar` (familiarización), `check` (prueba de señal), `recovery` (v3.1: primera correcta tras un error, regreso al punto saltado). Las −1 nunca se entrenan ni evalúan |
 | `rejected` | bool `[n]` | puerta de §3 |
 | `reject_reason` | str `[n]` | `"ok"` o motivos con `+` |
 | `action_id` | int64 `[n]` | de events.csv |

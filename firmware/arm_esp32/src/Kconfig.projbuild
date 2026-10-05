@@ -31,6 +31,14 @@ config ARM_ESPNOW_CMD
         Con 1 el brazo ejecuta el JSON dentro del callback de Wi-Fi, en paralelo con loop(),
         que también usa el bus de servos: riesgo de colisiones. 2 lo ejecuta en loop().
 
+config ARM_LOCAL_DETECTOR
+    bool "Detector ErrP local (sin S3): EEG del puente por la UART del S3"
+    default y
+    help
+        El supervisor recibe las tramas link_protocol.h del puente (TX GPIO17 del puente -> RX
+        ARM_S3_UART_RX_GPIO, 921600) y corre el ErrP-AE de C2 (detector.c). Los niveles van a
+        safety.c por la misma ruta que el ALERT del S3. Desactivar para usar el S3 real.
+
 config ARM_S3_UART_TX_GPIO
     int "GPIO TX hacia el S3 (UART2)"
     default 27
