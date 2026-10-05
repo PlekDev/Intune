@@ -73,24 +73,6 @@ errp_epoch_status_t errp_epoch_cut(const errp_ring_t *r, uint32_t t0_counter,
     return ERRP_EPOCH_OK;
 }
 
-void errp_preprocess(const float win[ERRP_N_CH][ERRP_EPOCH_LEN], float x[ERRP_N_CH][ERRP_N_T])
-{
-    for (int c = 0; c < ERRP_N_CH; c++) {
-        double base = 0;
-        for (int i = 0; i < ERRP_PRE; i++) {
-            base += win[c][i];
-        }
-        float b = (float)(base / ERRP_PRE);
-        for (int t = 0; t < ERRP_N_T; t++) {
-            float s = 0;
-            for (int k = 0; k < ERRP_DECIM; k++) {
-                s += win[c][ERRP_PRE + t * ERRP_DECIM + k] - b;
-            }
-            x[c][t] = s / ERRP_DECIM;
-        }
-    }
-}
-
 errp_epoch_status_t errp_epoch_gate(const errp_window_info_t *info, const float x[ERRP_N_CH][ERRP_N_T],
                                     float gate_gyro_dps)
 {
@@ -121,15 +103,6 @@ errp_epoch_status_t errp_epoch_gate(const errp_window_info_t *info, const float 
     return ERRP_EPOCH_OK;
 }
 
-void errp_normalize(float x[ERRP_N_CH][ERRP_N_T], const float mean[ERRP_N_CH], const float std[ERRP_N_CH])
-{
-    for (int c = 0; c < ERRP_N_CH; c++) {
-        for (int t = 0; t < ERRP_N_T; t++) {
-            x[c][t] = (x[c][t] - mean[c]) / std[c];
-        }
-    }
-}
-
 float errp_lda_score(const float x[ERRP_N_CH][ERRP_N_T])
 {
     float score = ERRP_LDA_B;
@@ -144,18 +117,6 @@ float errp_lda_score(const float x[ERRP_N_CH][ERRP_N_T])
         }
     }
     return score;
-}
-
-float errp_mse(const float a[ERRP_N_CH][ERRP_N_T], const float b[ERRP_N_CH][ERRP_N_T])
-{
-    double s = 0;
-    for (int c = 0; c < ERRP_N_CH; c++) {
-        for (int t = 0; t < ERRP_N_T; t++) {
-            double d = (double)a[c][t] - b[c][t];
-            s += d * d;
-        }
-    }
-    return (float)(s / (ERRP_N_CH * ERRP_N_T));
 }
 
 static int cmp_float(const void *x, const void *y)

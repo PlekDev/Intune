@@ -6,11 +6,10 @@
 #include <string.h>
 
 #include "arm_link.h"
+#include "autoencoder_engine.h"
 #include "driver/gpio.h"
 #include "eeg_input.h"
 #include "errp_dsp.h"
-#include "errp_golden.h"
-#include "errp_model.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -27,15 +26,8 @@ static const char *TAG = "detector";
 #define OVERLAP_US   (ARM_SYNC_MIN_SPACING_MS * 1000LL)
 #define MAX_PENDING  4
 #define NVS_NS       "intune"
-#define NVS_KEY      "calib"
-#define CALIB_MAGIC  0x494E5431u  // "INT1"
-
-typedef struct {
-    uint32_t magic;
-    float mean[ERRP_N_CH], std[ERRP_N_CH];
-    float t_ae[3], t_lda[3];
-    uint16_t n;
-} calib_t;
+#define NVS_KEY_AE   "ae_calib"  // ae_calib_t tal cual (incluye model_id)
+#define NVS_KEY_LDA  "lda_t"     // float[3] umbrales del LDA
 
 typedef struct {
     int64_t t_us;       // flanco de sincronía
@@ -47,7 +39,10 @@ typedef struct {
 static errp_ring_t s_ring;
 static SemaphoreHandle_t s_ring_lock;
 static QueueHandle_t s_sync_q;
-static calib_t s_cal;
+static ae_calib_t s_ae_cal;   // normalización + T1-T3 del AE + model_id (motor ae_*)
+static float s_lda_t[3];      // T1-T3 del LDA (respaldo)
+static ae_workspace_t s_ws;   // buffers de ae_infer (solo la tarea detector)
+static int64_t s_inf_us;      // duración de la última ae_infer
 static errp_alert_t s_alert;
 
 // Calibración en curso
@@ -71,16 +66,9 @@ static void IRAM_ATTR sync_isr(void *arg)
 // ---------- calibración ----------
 static void calib_defaults(void)
 {
-    s_cal.magic = CALIB_MAGIC;
-    memcpy(s_cal.mean, ERRP_DEFAULT_MEAN, sizeof(s_cal.mean));
-    memcpy(s_cal.std, ERRP_DEFAULT_STD, sizeof(s_cal.std));
-    s_cal.t_ae[0] = ERRP_DEFAULT_T1;
-    s_cal.t_ae[1] = ERRP_DEFAULT_T2;
-    s_cal.t_ae[2] = ERRP_DEFAULT_T3;
-    // Sin umbrales LDA offline de correctos de sesión: usar los del entrenamiento LDA no
-    // aplica en vivo; se fuerzan a calibración. Hasta entonces, el AE decide.
-    s_cal.t_lda[0] = s_cal.t_lda[1] = s_cal.t_lda[2] = INFINITY;
-    s_cal.n = 0;
+    ae_calib_default(&s_ae_cal);  // normalización y umbrales del modelo cargado + model_id
+    // Sin umbrales LDA de una sesión: nunca alerta hasta calibrar (con LDA activo, calibrar antes).
+    s_lda_t[0] = s_lda_t[1] = s_lda_t[2] = INFINITY;
 }
 
 static bool calib_load(void)
@@ -89,13 +77,18 @@ static bool calib_load(void)
     if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
         return false;
     }
-    calib_t c;
-    size_t len = sizeof(c);
-    bool ok = nvs_get_blob(h, NVS_KEY, &c, &len) == ESP_OK && len == sizeof(c) && c.magic == CALIB_MAGIC;
-    nvs_close(h);
+    ae_calib_t c;
+    float t[3];
+    size_t len = sizeof(c), len_t = sizeof(t);
+    // ae_calib_check rechaza blobs corruptos o de otro modelo (model_id distinto)
+    bool ok = nvs_get_blob(h, NVS_KEY_AE, &c, &len) == ESP_OK && len == sizeof(c) && ae_calib_check(&c);
     if (ok) {
-        s_cal = c;
+        s_ae_cal = c;
+        if (nvs_get_blob(h, NVS_KEY_LDA, t, &len_t) == ESP_OK && len_t == sizeof(t)) {
+            memcpy(s_lda_t, t, sizeof(t));
+        }
     }
+    nvs_close(h);
     return ok;
 }
 
@@ -103,7 +96,8 @@ static void calib_save(void)
 {
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
-        nvs_set_blob(h, NVS_KEY, &s_cal, sizeof(s_cal));
+        nvs_set_blob(h, NVS_KEY_AE, &s_ae_cal, sizeof(s_ae_cal));
+        nvs_set_blob(h, NVS_KEY_LDA, s_lda_t, sizeof(s_lda_t));
         nvs_commit(h);
         nvs_close(h);
     }
@@ -112,9 +106,13 @@ static void calib_save(void)
 static const float *active_thresholds(void)
 {
 #if CONFIG_DETECTOR_USE_LDA
-    return s_cal.t_lda;
+    return s_lda_t;
 #else
-    return s_cal.t_ae;
+    static float t[3];
+    t[0] = s_ae_cal.t1;
+    t[1] = s_ae_cal.t2;
+    t[2] = s_ae_cal.t3;
+    return t;
 #endif
 }
 
@@ -147,41 +145,43 @@ static void calib_begin(void)
 
 static void calib_finish(void)
 {
-    // mean/std por canal sobre epochs y tiempo (errp_pipeline.channel_stats)
-    for (int c = 0; c < ERRP_N_CH; c++) {
-        double s = 0, s2 = 0;
-        for (int i = 0; i < s_calib_n; i++) {
-            for (int t = 0; t < ERRP_N_T; t++) {
-                double v = s_calib_epochs[i][c][t];
-                s += v;
-                s2 += v * v;
-            }
-        }
-        double n = (double)s_calib_n * ERRP_N_T;
-        double m = s / n;
-        double sd = sqrt(fmax(s2 / n - m * m, 0.0));
-        s_cal.mean[c] = (float)m;
-        s_cal.std[c] = fmaxf((float)sd, ERRP_STD_FLOOR);  // piso como build_dataset.py
+    // mean/std por canal (Welford, ddof 0) y T1-T3 = p90/p97/p99 de los scores, con el motor ae_*
+    ae_calib_t c;
+    ae_calib_default(&c);  // model_id + umbrales válidos mientras se calculan los scores
+    ae_norm_acc_t acc;
+    ae_norm_acc_init(&acc);
+    for (int i = 0; i < s_calib_n; i++) {
+        ae_norm_acc_add(&acc, (const float (*)[AE_N_T])s_calib_epochs[i]);
     }
     static float scores[150];
-    for (int i = 0; i < s_calib_n; i++) {
-        errp_normalize(s_calib_epochs[i], s_cal.mean, s_cal.std);
-        scores[i] = errp_model_score(s_calib_epochs[i], NULL);
+    int n = 0;
+    bool ok = ae_norm_acc_finish(&acc, &c);
+    for (int i = 0; ok && i < s_calib_n; i++) {
+        ae_result_t r = ae_infer((const float (*)[AE_N_T])s_calib_epochs[i], &c, &s_ws);
+        if (r.valid) {
+            scores[n++] = r.score;
+        }
     }
-    const float pct[3] = {ERRP_PCT_T1, ERRP_PCT_T2, ERRP_PCT_T3};
-    for (int k = 0; k < 3; k++) {
-        s_cal.t_ae[k] = errp_percentile(scores, s_calib_n, pct[k]);
-        s_cal.t_lda[k] = errp_percentile(s_calib_lda, s_calib_n, pct[k]);
-    }
-    s_cal.n = (uint16_t)s_calib_n;
-    calib_save();
+    ok = ok && ae_calib_thresholds_from_scores(&c, scores, n);
     s_calibrating = false;
+    if (!ok) {
+        ESP_LOGE(TAG, "calibración inválida (%d scores válidos de %d): se quedan los valores anteriores",
+                 n, s_calib_n);
+        printf("{\"ev\":\"calib_failed\",\"n\":%d,\"valid\":%d}\n", s_calib_n, n);
+        return;
+    }
+    s_ae_cal = c;
+    const float pct[3] = {ERRP_LDA_PCT_T1, ERRP_LDA_PCT_T2, ERRP_LDA_PCT_T3};
+    for (int k = 0; k < 3; k++) {
+        s_lda_t[k] = errp_percentile(s_calib_lda, s_calib_n, pct[k]);  // ordena s_calib_lda
+    }
+    calib_save();
     alert_reset_thresholds();
     s_alert.level = 0;  // se calibró con EEG limpio: arrancar en normal
-    ESP_LOGW(TAG, "calibración lista (%d epochs): AE T1 %.4f T2 %.4f T3 %.4f | LDA T1 %.3f T2 %.3f T3 %.3f",
-             s_calib_n, s_cal.t_ae[0], s_cal.t_ae[1], s_cal.t_ae[2], s_cal.t_lda[0], s_cal.t_lda[1], s_cal.t_lda[2]);
+    ESP_LOGW(TAG, "calibración lista (%d épocas): AE T1 %.4f T2 %.4f T3 %.4f | LDA T1 %.3f T2 %.3f T3 %.3f",
+             s_calib_n, c.t1, c.t2, c.t3, s_lda_t[0], s_lda_t[1], s_lda_t[2]);
     printf("{\"ev\":\"calib_done\",\"n\":%d,\"t_ae\":[%.5f,%.5f,%.5f],\"t_lda\":[%.4f,%.4f,%.4f]}\n", s_calib_n,
-           s_cal.t_ae[0], s_cal.t_ae[1], s_cal.t_ae[2], s_cal.t_lda[0], s_cal.t_lda[1], s_cal.t_lda[2]);
+           c.t1, c.t2, c.t3, s_lda_t[0], s_lda_t[1], s_lda_t[2]);
 }
 
 // ---------- epoch ----------
@@ -197,7 +197,7 @@ static void process_pulse(const pulse_t *p, uint16_t action_id, uint8_t *flags_o
         xSemaphoreGive(s_ring_lock);
     }
     if (st == ERRP_EPOCH_OK) {
-        errp_preprocess(win, e);  // X [8][40] µV, como el dataset de C4
+        ae_preprocess((const float (*)[AE_WIN_SAMPLES])win, e);  // X [8][40] µV, como el dataset de C4
         st = errp_epoch_gate(&info, e, (float)CONFIG_DETECTOR_GATE_GYRO_DPS);
     }
     uint8_t flags = s_calibrating ? ARM_FLAG_CALIBRATING : 0;
@@ -218,8 +218,11 @@ static void process_pulse(const pulse_t *p, uint16_t action_id, uint8_t *flags_o
                 calib_finish();
             }
         } else {
-            errp_normalize(e, s_cal.mean, s_cal.std);
-            ae = errp_model_score(e, NULL);
+            // normalizar -> int8 -> TFLM -> decuantizar -> MSE; inválido => score +inf (nivel 3)
+            int64_t t0 = esp_timer_get_time();
+            ae_result_t r = ae_infer((const float (*)[AE_N_T])e, &s_ae_cal, &s_ws);
+            s_inf_us = esp_timer_get_time() - t0;
+            ae = r.score;
 #if CONFIG_DETECTOR_USE_LDA
             errp_alert_score(&s_alert, lda);
 #else
@@ -230,7 +233,7 @@ static void process_pulse(const pulse_t *p, uint16_t action_id, uint8_t *flags_o
     printf("{\"ev\":\"epoch\",\"t_us\":%" PRId64 ",\"cnt\":%" PRIu32 ",\"action\":%u,\"status\":\"%s\","
            "\"ae\":%.5f,\"lda\":%.4f,\"level\":%d,\"flags\":%u,\"calib\":%d,\"inf_us\":%" PRId64 "}\n",
            p->t_us, p->counter, action_id, status, ae, lda, s_alert.level, flags,
-           s_calibrating ? s_calib_n : -1, errp_model_last_us());
+           s_calibrating ? s_calib_n : -1, s_inf_us);
     *flags_out = flags;
     *score_out = ae;
 }
@@ -364,24 +367,21 @@ static void detector_task(void *arg)
 
 bool detector_selftest(void)
 {
-    bool ok = true;
-    for (int i = 0; i < ERRP_N_GOLDEN; i++) {
-        // Misma ruta que en vivo: X µV -> LDA y normalización por canal -> modelo
-        static float z[ERRP_N_CH][ERRP_N_T];
-        memcpy(z, ERRP_GOLDEN_X[i], sizeof(z));
-        float lda = errp_lda_score(z);
-        errp_normalize(z, ERRP_GOLDEN_MEAN[i], ERRP_GOLDEN_STD[i]);
-        float s = errp_model_score(z, NULL);
-        float ref = ERRP_GOLDEN_SCORE_INT8[i];
-        float rel = fabsf(s - ref) / fmaxf(ref, 1e-6f);
-        bool pass = rel < 0.02f && fabsf(lda - ERRP_GOLDEN_LDA[i]) < 1e-3f;
-        ok &= pass;
-        ESP_LOGI(TAG, "golden %d (label %d): S3 %.5f, PC int8 %.5f, float %.5f, err rel %.2e, LDA %.4f/%.4f %s"
-                 " (%" PRId64 " us)", i, ERRP_GOLDEN_LABEL[i], s, ref, ERRP_GOLDEN_SCORE_FLOAT[i], rel, lda,
-                 ERRP_GOLDEN_LDA[i], pass ? "OK" : "FALLA", errp_model_last_us());
-    }
-    printf("{\"ev\":\"selftest\",\"pass\":%d,\"arena\":%u,\"inf_us\":%" PRId64 "}\n", ok,
-           (unsigned)errp_model_arena_used(), errp_model_last_us());
+    // Los vectores dorados del motor (prueba 12) están en el entorno engine_test; aquí se
+    // comprueba que el modelo cargó y se mide una inferencia con la calibración por defecto.
+    const ae_model_info_t *mi = ae_model_info();
+    ae_calib_t c;
+    ae_calib_default(&c);
+    static float e[AE_N_CH][AE_N_T];  // época de ceros: z = -mean/std, finita
+    int64_t t0 = esp_timer_get_time();
+    ae_result_t r = ae_infer((const float (*)[AE_N_T])e, &c, &s_ws);
+    int64_t us = esp_timer_get_time() - t0;
+    bool ok = ae_is_ready() && r.valid && us < 20000;
+    ESP_LOGI(TAG, "modelo %s %s (%s), arena %lu / %lu B, inferencia %" PRId64 " us, score %.4f: %s",
+             mi->arch, mi->model_id, mi->placeholder ? "PLACEHOLDER" : "entrenado",
+             (unsigned long)mi->arena_used_bytes, (unsigned long)mi->arena_bytes, us, r.score, ok ? "OK" : "FALLA");
+    printf("{\"ev\":\"selftest\",\"pass\":%d,\"model_id\":\"%s\",\"placeholder\":%d,\"arena\":%lu,\"inf_us\":%" PRId64
+           "}\n", ok, mi->model_id, mi->placeholder, (unsigned long)mi->arena_used_bytes, us);
     return ok;
 }
 
@@ -393,7 +393,8 @@ void detector_start(void)
 
     calib_defaults();
     bool loaded = calib_load();
-    ESP_LOGI(TAG, "calibración: %s", loaded ? "cargada de NVS" : "valores offline de errp_params.h");
+    ESP_LOGI(TAG, "calibración: %s", loaded ? "cargada de NVS (model_id coincide)"
+                                          : "por defecto del modelo (autoencoder_weights.h)");
     errp_alert_init(&s_alert, active_thresholds()[0], active_thresholds()[1], active_thresholds()[2]);
     s_alert.level = 3;  // paro seguro hasta calibrar, un epoch limpio <= T1 o CONFIRM
 

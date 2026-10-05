@@ -1,11 +1,18 @@
-// Prueba del DSP en el PC contra los valores de referencia de Python (errp_golden.h).
-//   gcc -O2 -Wall -Wextra -Werror -Iinclude test/host_dsp_test.c src/errp_dsp.c -lm -o /tmp/dsp && /tmp/dsp
+// Prueba del DSP de la app (ring, gate, LDA, IIR, alertas) y de ae_preprocess en el PC contra los
+// valores de referencia de Python (errp_golden.h). El motor ae_* completo se prueba con test/test_c_engine.c.
+//   gcc -O2 -Wall -Wextra -Werror -ffp-contract=off -Iinclude test/host_dsp_test.c src/errp_dsp.c
+//       src/autoencoder_engine.c -lm -o /tmp/dsp && /tmp/dsp
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "autoencoder_engine.h"
 #include "errp_dsp.h"
 #include "errp_golden.h"
+
+// ae_preprocess no usa el runner; estos stubs solo satisfacen al enlazador.
+bool ae_runner_init(ae_model_info_t *info) { (void)info; return false; }
+bool ae_runner_invoke(const int8_t in[AE_N_IN], int8_t out[AE_N_IN]) { (void)in; (void)out; return false; }
 
 static int fails;
 
@@ -30,24 +37,12 @@ int main(void)
 {
     // Preprocesado y LDA sobre la ventana de referencia
     float x[ERRP_N_CH][ERRP_N_T];
-    errp_preprocess(ERRP_GOLDEN_WIN, x);
-    check("preprocesado [8][250] -> [8][40] vs Python, µV", max_err(x, ERRP_GOLDEN_WIN_X) < 1e-4, "%.2e",
+    ae_preprocess(ERRP_GOLDEN_WIN, x);
+    check("ae_preprocess [8][250] -> [8][40] vs Python, µV", max_err(x, ERRP_GOLDEN_WIN_X) < 1e-4, "%.2e",
           max_err(x, ERRP_GOLDEN_WIN_X));
     float lda = errp_lda_score(x);
     check("LDA de la ventana vs Python", fabsf(lda - ERRP_GOLDEN_WIN_LDA) < 1e-3, "%.2e",
           fabs(lda - ERRP_GOLDEN_WIN_LDA));
-
-    // Épocas de C4: normalización por canal y LDA
-    double nerr = 0, lerr = 0;
-    for (int g = 0; g < ERRP_N_GOLDEN; g++) {
-        float z[ERRP_N_CH][ERRP_N_T];
-        memcpy(z, ERRP_GOLDEN_X[g], sizeof(z));
-        lerr = fmax(lerr, fabs(errp_lda_score(z) - ERRP_GOLDEN_LDA[g]));
-        errp_normalize(z, ERRP_GOLDEN_MEAN[g], ERRP_GOLDEN_STD[g]);
-        nerr = fmax(nerr, max_err(z, ERRP_GOLDEN_INPUT[g]));
-    }
-    check("normalización por canal de épocas de C4 vs Python", nerr < 1e-4, "%.2e", nerr);
-    check("LDA de épocas de C4 vs Python", lerr < 1e-3, "%.2e", lerr);
 
     // Ring buffer: escribir la ventana como stream y recortarla por contador
     static errp_ring_t ring;
@@ -71,7 +66,7 @@ int main(void)
 
     // Gate en el orden de build_dataset.py
     errp_epoch_cut(&ring, t0, win, &info);
-    errp_preprocess(win, x);
+    ae_preprocess((const float (*)[AE_WIN_SAMPLES])win, x);
     check("gate: ventana limpia -> ok", errp_epoch_gate(&info, x, 30.0f) == ERRP_EPOCH_OK, "%.0f", 0);
     check("gate: gyro 20 > 15 -> gyro", errp_epoch_gate(&info, x, 15.0f) == ERRP_EPOCH_GYRO, "%.0f", 0);
     errp_window_info_t fi = info;

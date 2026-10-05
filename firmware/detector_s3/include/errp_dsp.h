@@ -1,5 +1,6 @@
 // DSP del Detector (C2) en C puro, sin ESP-IDF: se prueba en el PC (test/host_dsp_test.c).
-// Replica ml/data/build_dataset.py (C4, FORMAT.md §2-3) y ml/autoencoder/errp_pipeline.py.
+// Replica la puerta de ml/data/build_dataset.py (C4, FORMAT.md §3) y el LDA de baseline_lda.py.
+// Preprocesado, normalización, inferencia y calibración del AE: autoencoder_engine.h (ae_*).
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
@@ -57,21 +58,13 @@ typedef struct {
 errp_epoch_status_t errp_epoch_cut(const errp_ring_t *r, uint32_t t0_counter,
                                    float win[ERRP_N_CH][ERRP_EPOCH_LEN], errp_window_info_t *info);
 
-// FORMAT.md §2 pasos 3-4: baseline [-200, 0) restado y media de cada 5 sobre [0, 800): [8][250] -> X [8][40].
-void errp_preprocess(const float win[ERRP_N_CH][ERRP_EPOCH_LEN], float x[ERRP_N_CH][ERRP_N_T]);
-
 // FORMAT.md §3 en el orden de build_dataset.py: flags, flat, amplitude, gyro.
 // gate_gyro_dps <= 0 desactiva el gate de movimiento.
 errp_epoch_status_t errp_epoch_gate(const errp_window_info_t *info, const float x[ERRP_N_CH][ERRP_N_T],
                                     float gate_gyro_dps);
 
-void errp_normalize(float x[ERRP_N_CH][ERRP_N_T], const float mean[ERRP_N_CH], const float std[ERRP_N_CH]);
-
 // Score LDA (respaldo) sobre X [8][40] en µV (sin normalizar).
 float errp_lda_score(const float x[ERRP_N_CH][ERRP_N_T]);
-
-// MSE entre época normalizada y su reconstrucción, ambas [8][40].
-float errp_mse(const float a[ERRP_N_CH][ERRP_N_T], const float b[ERRP_N_CH][ERRP_N_T]);
 
 // Percentil con interpolación lineal (igual que numpy.percentile por defecto). Ordena v.
 float errp_percentile(float *v, int n, float pct);

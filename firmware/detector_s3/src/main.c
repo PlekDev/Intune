@@ -1,11 +1,11 @@
 // INTUNE Detector (C2, ESP32-S3): EEG filtrado + pulsos de sincronía del brazo ->
-// epochs ErrP -> ErrP-AE (TFLite Micro int8) -> nivel de alerta 0-3 -> brazo por UART.
+// épocas ErrP -> ErrP-AE int8 (motor ae_*, TFLite Micro) -> nivel de alerta 0-3 -> brazo por UART.
 //
 // Consola (UART0/USB): logs ESP_LOG y una línea JSON por evento para el dashboard
 // de C5 ({"ev":"epoch"|"stats"|"calib_start"|"calib_done"|"arm_event"|"confirm"|"selftest", ...}).
 #include "arm_link.h"
 #include "detector.h"
-#include "errp_model.h"
+#include "autoencoder_engine.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -26,13 +26,13 @@ void app_main(void)
     // El brazo recibe nivel 3 desde el primer momento (heartbeat activo antes que nada)
     arm_link_start();
 
-    if (!errp_model_init()) {
-        ESP_LOGE(TAG, "no se pudo iniciar el modelo: el brazo queda en paro seguro");
+    if (!ae_init()) {  // TFLM + verificación del modelo contra autoencoder_weights.h
+        ESP_LOGE(TAG, "no se pudo iniciar el motor ae_* (¿arena?): el brazo queda en paro seguro");
         vTaskDelay(portMAX_DELAY);
     }
 #if CONFIG_DETECTOR_SELFTEST_ON_BOOT
     if (!detector_selftest()) {
-        ESP_LOGW(TAG, "la prueba de epochs de referencia FALLÓ: revisar export del modelo");
+        ESP_LOGW(TAG, "la autoprueba del modelo FALLÓ: correr el entorno engine_test");
     }
 #endif
     detector_start();
