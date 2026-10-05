@@ -1,0 +1,62 @@
+menu "INTUNE arm supervisor"
+
+choice ARM_LINK
+    prompt "Enlace con el brazo"
+    default ARM_LINK_UART
+    config ARM_LINK_UART
+        bool "UART (conector 40 pines del brazo, decisión del equipo)"
+    config ARM_LINK_ESPNOW
+        bool "ESP-NOW (sin cables)"
+endchoice
+
+config ARM_LINK_TX_GPIO
+    int "GPIO TX hacia el brazo (pin 8 del conector de 40 pines)"
+    depends on ARM_LINK_UART
+    default 17
+
+config ARM_LINK_RX_GPIO
+    int "GPIO RX desde el brazo (pin 10 del conector de 40 pines)"
+    depends on ARM_LINK_UART
+    default 16
+
+config ARM_AP_SSID
+    string "SSID del AP del RoArm-M2-S (para encontrar su canal y MAC)"
+    default "RoArm-M2"
+
+config ARM_ESPNOW_CMD
+    int "Campo cmd por defecto (1 = JSON en callback Wi-Fi del brazo, 2 = JSON en loop())"
+    range 1 2
+    default 2
+    help
+        Con 1 el brazo ejecuta el JSON dentro del callback de Wi-Fi, en paralelo con loop(),
+        que también usa el bus de servos: riesgo de colisiones. 2 lo ejecuta en loop().
+
+config ARM_S3_UART_TX_GPIO
+    int "GPIO TX hacia el S3 (UART2)"
+    default 27
+
+config ARM_S3_UART_RX_GPIO
+    int "GPIO RX desde el S3 (UART2)"
+    default 26
+
+config ARM_SYNC_GPIO
+    int "GPIO del pulso de sync hacia el S3"
+    default 25
+
+config ARM_LED_GPIO
+    int "GPIO del LED de estado"
+    default 2
+
+config ARM_BUTTON_GPIO
+    int "GPIO del botón del operador (activo en bajo)"
+    default 0
+    help
+        BOOT en el DevKit. Pulsación corta = confirmar pausa (nivel 2),
+        larga (2 s) = rearmar tras parada (nivel 3 o heartbeat perdido).
+
+config ARM_LEVEL1_SPEED_PCT
+    int "Velocidad en nivel 1 (% de la nominal)"
+    range 5 100
+    default 40
+
+endmenu
