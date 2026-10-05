@@ -110,12 +110,21 @@ def build_session(path: Path, latency_ms=EVENT_LATENCY_OFFSET_MS, gate_uv=GATE_U
     lat_samples = int(round(latency_ms / SAMPLE_MS))
     n = len(ev)
     evc = pd.to_numeric(ev["evt_counter"], errors="coerce").to_numpy(np.float64)
-    valid_evc = evc[np.isfinite(evc)]
     status = ev["status"].astype(str).to_numpy()
     evt_flags = pd.to_numeric(ev["evt_flags"], errors="coerce").fillna(0).astype(int).to_numpy()
     onset_arm = pd.to_numeric(ev["t_onset_arm"], errors="coerce").to_numpy(np.float64)
+    t_sent = pd.to_numeric(ev["t_sent"], errors="coerce").to_numpy(np.float64)
+
+    # Tramos de sesión Unicorn: tras una reconexión el contador vuelve a 1 y se REPITE dentro de
+    # eeg.csv (también tras un salto > 10 s; ver respuesta de C1). Cada fila y cada evento se asignan
+    # a su tramo por la hora de la PC; contador y overlap solo se comparan dentro del mismo tramo.
+    ss_rows = np.flatnonzero(flags & F_SESSION_START)
+    seg_row = np.cumsum((flags & F_SESSION_START) != 0)            # 1, 2, ... (0 = antes del primero)
+    t_ev = np.where(np.isfinite(onset_arm), onset_arm, t_sent)
+    seg_ev = np.searchsorted(t_arr[ss_rows], t_ev, side="right")   # tramo vigente al lanzar la acción
 
     X = np.zeros((n, N_CH, N_T), np.float32)
+    W = np.zeros((n, N_CH, PRE_SAMPLES + POST_SAMPLES), np.float32)  # ventana f_* cruda [-200, +800)
     reasons = [[] for _ in range(n)]
     max_abs = np.full(n, np.nan, np.float32)
     gyro_m = np.full(n, np.nan, np.float32)
@@ -129,11 +138,12 @@ def build_session(path: Path, latency_ms=EVENT_LATENCY_OFFSET_MS, gate_uv=GATE_U
                 rs.append("status")
             continue
         c0 = int(evc[k]) - lat_samples
-        # vecinos < 1.0 s (otro flanco), contando el propio flanco original
-        d = np.abs(valid_evc - evc[k])
+        # vecinos < 1.0 s (otro flanco del MISMO tramo), contando el propio flanco original
+        same = np.isfinite(evc) & (seg_ev == seg_ev[k])
+        d = np.abs(evc[same] - evc[k])
         if np.sum(d < OVERLAP_S * FS_IN) > 1 or (evt_flags[k] & 0x02):
             rs.append("overlap")
-        cand = np.flatnonzero(counter == c0)
+        cand = np.flatnonzero((counter == c0) & (seg_row == seg_ev[k]))
         if len(cand) == 0:
             rs.append("counter")
             continue
@@ -150,6 +160,7 @@ def build_session(path: Path, latency_ms=EVENT_LATENCY_OFFSET_MS, gate_uv=GATE_U
         if has_raw and np.nanmax(np.abs(r[a:b])) >= ADC_SAT_UV:
             rs.append("saturated")
         win = f[a:b]                                       # [250, 8] uV, ya filtrado por el puente
+        W[k] = win.T                                       # para C2: la preprocesa como el S3 (float32)
         win = win - win[:PRE_SAMPLES].mean(axis=0)         # baseline [-200, 0) ms
         x = win[PRE_SAMPLES:].reshape(N_T, DECIMATION, N_CH).mean(axis=1).T   # [8, 40] boxcar x5
         X[k] = x
@@ -192,6 +203,7 @@ def build_session(path: Path, latency_ms=EVENT_LATENCY_OFFSET_MS, gate_uv=GATE_U
 
     out = dict(
         X=X,
+        W=W,
         y=y,
         rejected=rejected,
         reject_reason=reject_reason,
@@ -246,12 +258,17 @@ def main():
     ap.add_argument("--gate-gyro", type=float, default=GATE_GYRO)
     ap.add_argument("--n-cal", type=int, default=N_CAL)
     ap.add_argument("--suggest-gyro", action="store_true", help="solo imprime un GATE_GYRO sugerido")
+    ap.add_argument("--export-c2", type=Path, metavar="NPZ",
+                    help="además, juntar todas las sesiones en un .npz para ml/autoencoder/train_errp_ae.py")
+    ap.add_argument("--c2-include-calibration", action="store_true",
+                    help="no quitar las épocas de calibración del export para C2")
     a = ap.parse_args()
 
     sessions = a.sessions or sorted(p for p in (here / "raw").glob("*") if (p / "eeg.csv").exists())
     if not sessions:
         sys.exit("no hay sesiones crudas (ml/data/raw/*/eeg.csv); prueba ml/data/make_synthetic.py")
     a.out.mkdir(parents=True, exist_ok=True)
+    built = []
     for s in sessions:
         if a.suggest_gyro:
             eeg, _, _, blocks = load_session(s)
@@ -263,6 +280,34 @@ def main():
         np.savez_compressed(dest, **out)
         summarize(out)
         print(f"  -> {dest}")
+        built.append(out)
+    if a.export_c2 and built:
+        export_c2(built, a.export_c2, a.c2_include_calibration)
+
+
+def export_c2(outs, dest: Path, include_calibration=False):
+    """Formato de entrada de train_errp_ae.py (C2): windows [N, 8, 250] float32 (f_* tras el IIR,
+    sin baseline; C2 aplica errp_ae.preprocess_window = ae_preprocess del S3), epochs [N, 8, 40]
+    (X, referencia), is_error [N] bool, session [N] int64 (índice de sesión). Solo épocas limpias
+    correct/error; sin las de calibración salvo include_calibration (CLAUDE.md: no se entrenan)."""
+    win, ep, err, ses, names = [], [], [], [], []
+    for i, o in enumerate(outs):
+        keep = ~o["rejected"] & (o["y"] >= 0)
+        if not include_calibration:
+            keep &= ~o["is_calibration"]
+        win.append(o["W"][keep])
+        ep.append(o["X"][keep])
+        err.append(o["y"][keep] == 1)
+        ses.append(np.full(int(keep.sum()), i, np.int64))
+        names.append(str(o["session"]))
+    arrays = dict(windows=np.concatenate(win), epochs=np.concatenate(ep), is_error=np.concatenate(err),
+                  session=np.concatenate(ses), session_names=np.array(names),
+                  latency_offset_ms=np.float64(outs[0]["latency_offset_ms"]),
+                  pipeline_version=np.array(PIPELINE_VERSION))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(dest, **arrays)
+    n, ne = len(arrays["is_error"]), int(arrays["is_error"].sum())
+    print(f"export C2: {n} épocas limpias ({n - ne} correct, {ne} error) de {len(outs)} sesiones -> {dest}")
 
 
 if __name__ == "__main__":

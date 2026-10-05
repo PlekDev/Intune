@@ -60,6 +60,7 @@ Se carga con `np.load(path, allow_pickle=False)`. Las cadenas son arreglos unico
 | Clave | Tipo / forma | Significado |
 |---|---|---|
 | `X` | float32 `[n, 8, 40]` | µV sin normalizar (§2) |
+| `W` | float32 `[n, 8, 250]` | ventana f_* cruda [−200, +800) ms (tras el IIR del puente, sin baseline ni diezmado); ceros si no hubo ventana. Es la entrada `windows` de C2 |
 | `y` | int8 `[n]` | 0 correct, 1 error, −1 manual (label de events.csv) |
 | `rejected` | bool `[n]` | puerta de §3 |
 | `reject_reason` | str `[n]` | `"ok"` o motivos con `+` |
@@ -151,6 +152,19 @@ Qué cambia respecto a la rama `origin/Autoencoder` (AE denso de 40 features, 40
 Aumentos de CLAUDE.md (jitter ±20 ms, ruido, ganancia ±10 % por canal): `X` ya está diezmado a 50 Hz
 (1 muestra = 20 ms), así que el jitter de ±20 ms equivale a desplazar ±1 muestra de `X` (replicando el borde).
 Si C2 quiere jitter más fino, que lo pida y C4 exporta también la ventana de 250 muestras.
+
+### Export directo para `train_errp_ae.py` (C2)
+
+```bash
+.venv/bin/python ml/data/build_dataset.py --export-c2 ml/data/processed/c2_train.npz
+.venv/bin/python ml/autoencoder/train_errp_ae.py --data ml/data/processed/c2_train.npz --out runs/r1
+```
+
+Junta todas las sesiones en un `.npz` con las claves que lee C2: `windows` `[N, 8, 250]` (= `W`), `epochs`
+`[N, 8, 40]` (= `X`, referencia), `is_error` bool, `session` int64 (índice de sesión) y `session_names`. Solo
+épocas limpias (`~rejected`, label correct/error) y sin las de calibración (`--c2-include-calibration` para
+incluirlas). C2 preprocesa `windows` con `errp_ae.preprocess_window` (float32, igual que el S3) y calcula su
+propia normalización por sesión.
 
 ## 9. Decisiones abiertas con C2
 

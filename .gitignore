@@ -32,3 +32,6 @@ ml/data/raw/
 ml/data/processed/
 __pycache__/
 .pytest_cache/
+
+# Salidas temporales de entrenamiento (los modelos a conservar van en ml/autoencoder/models/)
+runs/

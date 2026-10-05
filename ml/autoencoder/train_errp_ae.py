@@ -439,15 +439,42 @@ def augmented(ds: Dataset, idx: np.ndarray, norm: Norm, aug: Augment,
 
 # ---- Entrenamiento (TensorFlow solo aquí) ----
 
-def import_tf():
-    """TensorFlow + Keras deterministas: proceso fijado a una CPU antes de importar TensorFlow
+def _preload_nvidia_libs() -> None:
+    """Con tensorflow[and-cuda] instalado por pip, TF a veces no encuentra libcusolver.so.11 en su
+    propio rpath (y entonces ignora la GPU). Cargar las .so de los paquetes nvidia-* con
+    RTLD_GLOBAL antes de importar TF hace que su dlopen por nombre las encuentre."""
+    import ctypes
+    import glob
+    try:
+        import nvidia  # paquetes nvidia-*-cu12 (namespace)
+    except ImportError:
+        return
+    for base in list(nvidia.__path__):
+        for lib in ("cuda_runtime", "cublas", "cufft", "curand", "cusolver", "cusparse", "cudnn", "nvjitlink"):
+            for so in sorted(glob.glob(os.path.join(base, lib, "lib", "lib*.so.*"))):
+                with contextlib.suppress(OSError):
+                    ctypes.CDLL(so, mode=ctypes.RTLD_GLOBAL)
+
+
+def import_tf(device: str = "cpu"):
+    """device "cpu": determinista bit a bit (lo de abajo). "gpu"/"auto": CUDA si hay GPU; sin fijar
+    CPU ni hilos (no aplica a la GPU); sigue con op determinism (misma GPU, semilla y datos ->
+    mismos pesos), pero los resultados NO son bit a bit iguales a los de la CPU.
+
+    TensorFlow + Keras deterministas: proceso fijado a una CPU antes de importar TensorFlow
     (errp_ae.pin_single_cpu: en CPUs híbridas P/E el blocking de las GEMM de Eigen depende del
     tipo de núcleo), TF_ENABLE_ONEDNN_OPTS=0 (por defecto) y UN hilo intra/inter-op (con varios,
     Eigen reparte algunas contracciones por la dimensión interna y suma los parciales en el orden
     en que acaban los hilos). Con este modelo tan pequeño un hilo apenas cuesta."""
-    if "tensorflow" not in sys.modules and not ae.pin_single_cpu():
-        warn("no se pudo fijar el proceso a una CPU: en CPUs híbridas el entrenamiento puede no ser "
-             "determinista en los últimos bits")
+    use_gpu = device in ("gpu", "auto")
+    if not use_gpu:
+        os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")  # CPU pura aunque haya GPU
+        os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")   # sin el aviso "cuInit: no CUDA device"
+        if "tensorflow" not in sys.modules and not ae.pin_single_cpu():
+            warn("no se pudo fijar el proceso a una CPU: en CPUs híbridas el entrenamiento puede no ser "
+                 "determinista en los últimos bits")
+    elif "tensorflow" not in sys.modules:
+        _preload_nvidia_libs()
     os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
     try:
@@ -455,6 +482,19 @@ def import_tf():
         import tensorflow as tf
     except (ImportError, RuntimeError) as e:
         raise TrainError(str(e)) from None
+    if use_gpu:
+        gpus = tf.config.list_physical_devices("GPU")
+        if gpus:
+            for g in gpus:
+                with contextlib.suppress(RuntimeError):
+                    tf.config.experimental.set_memory_growth(g, True)
+            print(f"Dispositivo: GPU ({', '.join(tf.config.experimental.get_device_details(g).get('device_name', g.name) for g in gpus)})")
+            return tf, keras
+        if device == "gpu":
+            raise TrainError("--device gpu pero TensorFlow no ve ninguna GPU (¿tensorflow[and-cuda] instalado?)")
+        warn("sin GPU visible: se entrena en CPU (sin fijar a una CPU: no determinista bit a bit)")
+    else:
+        print("Dispositivo: CPU (1 hilo, determinista)")
     if os.environ.get("TF_ENABLE_ONEDNN_OPTS") != "0":
         warn("TF_ENABLE_ONEDNN_OPTS no es 0: oneDNN puede cambiar los resultados entre ejecuciones")
     try:
@@ -491,7 +531,7 @@ def predict_scores(model, z: np.ndarray) -> np.ndarray:
 def train(ds: Dataset, sp: Split, norm: Norm, z_val: np.ndarray, args: argparse.Namespace) -> TrainResult:
     """Bucle propio: una pasada de aumento por época, lotes con train_on_batch en un orden
     barajado con la semilla, MSE held-out y parada temprana con restauración de los mejores pesos."""
-    tf, keras = import_tf()
+    tf, keras = import_tf(args.device)
     keras.utils.set_random_seed(args.seed)
     tf.config.experimental.enable_op_determinism()
     rng = np.random.default_rng([args.seed, 2])
@@ -591,6 +631,7 @@ def build_config(args: argparse.Namespace, ds: Dataset, sp: Split, norm: Norm, r
             "early_stopping": res.stopped_early,
             "patience": args.patience,
             "batch_size": args.batch_size,
+            "device": args.device,
             "lr": args.lr,
             "l2": args.l2,
             "augment": {"jitter_ms": args.jitter_ms,
@@ -762,6 +803,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--patience", type=_int_range(1, 100000), default=15,
                     help="parada temprana: épocas sin mejorar el MSE held-out (def. 15)")
     ap.add_argument("--batch-size", type=_int_range(1, 65536), default=32, help="tamaño de lote (def. 32)")
+    ap.add_argument("--device", choices=("cpu", "gpu", "auto"), default="cpu",
+                    help="cpu (def.): 1 hilo, determinista bit a bit y, con este modelo, MÁS RÁPIDO que la GPU "
+                         "(RTX 4050: 2.4 s vs 3.9 s por 40 épocas). gpu/auto: CUDA, útil solo con modelos "
+                         "o datos mucho más grandes")
     ap.add_argument("--lr", type=_float_range(0.0, 1.0, lo_open=True), default=1e-3, help="Adam (def. 1e-3)")
     ap.add_argument("--l2", type=_float_range(0.0, 1.0), default=1e-4, help="weight decay L2 (def. 1e-4)")
     ap.add_argument("--val-frac", type=_float_range(0.05, 0.5), default=0.2,

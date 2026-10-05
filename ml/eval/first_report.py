@@ -121,10 +121,15 @@ def main():
               f"- Deteccion de error con 1 % de falsa alarma sobre correct: {100 * np.mean(p[yy == 1] > fa):.1f} %.",
               "- La CV mezcla epocas de una sola sesion: es optimista y solo valida que la senal sobrevive al pipeline. "
               "Para el reporte real, split por sesion/operador (FORMAT.md).", ""]
-    lines += ["## Lectura", "",
-              "Datos SINTETICOS (make_synthetic.py): el ErrP se inserto a mano. Esto prueba que el pipeline "
-              "(ventana, baseline, diezmado, compuerta) lo conserva y que el reporte funciona; "
-              "la prueba 11 real requiere grabaciones reales."]
+    if str(sess).startswith("synth"):
+        lines += ["## Lectura", "",
+                  "Datos SINTETICOS (make_synthetic.py): el ErrP se inserto a mano. Esto prueba que el pipeline "
+                  "(ventana, baseline, diezmado, compuerta) lo conserva y que el reporte funciona; "
+                  "la prueba 11 real requiere grabaciones reales."]
+    else:
+        lines += ["## Lectura", "",
+                  "Datos REALES. Prueba 11 (CLAUDE.md): pasa si la diferencia error - correct muestra una deflexion "
+                  "en Fz/Cz (IC 95 % que no incluye 0) y AUC > 0.6 con split por sesion."]
     out = a.out / f"report_{sess}.md"
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))
