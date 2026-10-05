@@ -1,0 +1,3 @@
+# Flags de xtensa-gcc que clangd no entiende
+CompileFlags:
+  Remove: [-mlongcalls, -fno-shrink-wrap, -fstrict-volatile-bitfields, -fno-tree-switch-conversion, -fzero-init-padding-bits=all, -fno-malloc-dce, -mdisable-hardware-atomics]

@@ -1,0 +1,82 @@
+menu "INTUNE detector"
+
+choice DETECTOR_INPUT
+    prompt "Formato del enlace desde el puente (C1)"
+    default DETECTOR_INPUT_RAW_UNICORN
+    help
+        Hoy el puente reenvía tramas Unicorn crudas de 45 B. Cuando C1 publique
+        firmware/common/link_protocol.h (EEG ya filtrado + flags + CRC) se agrega
+        ese backend en eeg_input.c y se vuelve el default.
+
+config DETECTOR_INPUT_RAW_UNICORN
+    bool "Tramas Unicorn crudas (provisional: el S3 aplica el IIR 1-15 Hz)"
+endchoice
+
+config DETECTOR_LINK_BAUD
+    int "Baud UART desde el puente"
+    default 921600
+
+config DETECTOR_LINK_RX_GPIO
+    int "GPIO RX UART desde el puente (TX del puente = GPIO17)"
+    default 18
+
+config DETECTOR_BRIDGE_STATUS_GPIO
+    int "GPIO de estado del puente (alto = streaming, -1 = no usar)"
+    default 8
+
+config DETECTOR_ARM_TX_GPIO
+    int "GPIO TX UART hacia el brazo (no 43/44: son la consola UART0)"
+    default 17
+
+config DETECTOR_ARM_RX_GPIO
+    int "GPIO RX UART desde el brazo"
+    default 16
+
+config DETECTOR_SYNC_GPIO
+    int "GPIO del pulso de sincronía del brazo (flanco de subida = t0)"
+    default 5
+
+config DETECTOR_EVENT_LATENCY_OFFSET_US
+    int "EVENT_LATENCY_OFFSET (us), medido en la prueba 10"
+    default 0
+    help
+        Retardo constante entre el flanco de sincronía y la muestra Unicorn
+        correspondiente (buffering BT/UART + retardo de grupo del IIR). Se resta
+        del tiempo del flanco antes de convertirlo a contador.
+
+config DETECTOR_GATE_GYRO_DPS
+    int "Gate de movimiento de cabeza: |gyro| máximo en el epoch (°/s, 0 = desactivado)"
+    default 30
+
+config DETECTOR_EEG_TIMEOUT_MS
+    int "Sin tramas válidas durante este tiempo => EEG perdido (nivel 3)"
+    default 500
+
+config DETECTOR_CALIB_EPOCHS
+    int "Epochs limpios para calibrar normalización y umbrales"
+    default 80
+    range 30 150
+
+config DETECTOR_CALIB_BUTTON_GPIO
+    int "Botón para recalibrar, activo bajo (-1 = sin botón)"
+    default 0
+
+config DETECTOR_CALIB_ON_BOOT
+    bool "Calibrar en cada arranque (el contacto de electrodos cambia entre sesiones)"
+    default y
+    help
+        Si está desactivado, usa la última calibración guardada en NVS o, si no
+        hay, los valores offline de errp_params.h.
+
+config DETECTOR_USE_LDA
+    bool "Usar el LDA como scorer de alertas en vez del autoencoder"
+    default n
+    help
+        Respaldo previsto en CLAUDE.md si el autoencoder rinde poco. Ambos
+        scores se calculan y se reportan siempre; esto solo elige cuál decide.
+
+config DETECTOR_SELFTEST_ON_BOOT
+    bool "Correr la prueba de epochs de referencia (prueba 12) al arrancar"
+    default y
+
+endmenu
