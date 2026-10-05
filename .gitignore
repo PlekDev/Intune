@@ -24,3 +24,11 @@ logs/
 *.h5
 *.pt
 *.onnx
+
+# C4: ml/data y ml/eval se versionan (codigo y reportes); las grabaciones y datasets no
+!ml/data/
+!ml/eval/
+ml/data/raw/
+ml/data/processed/
+__pycache__/
+.pytest_cache/
