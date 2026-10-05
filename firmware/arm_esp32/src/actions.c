@@ -18,6 +18,7 @@ static uint16_t s_action_id;
 static uint8_t s_label = ARM_LABEL_UNLABELED;
 static uint32_t s_event_seq;
 static volatile bool s_running, s_abort;
+static volatile int64_t s_last_onset_us = -10000000;
 static int s_reps;
 static float s_amp;
 
@@ -29,9 +30,14 @@ static void on_onset(void)
 {
     if (!s_armed) return;
     s_armed = false;
+    int64_t t = esp_timer_get_time();
+    if (t - s_last_onset_us < ARM_SYNC_MIN_SPACING_MS * 1000LL) {   // red de seguridad (actions_act ya lo filtra)
+        ESP_LOGW(TAG, "acción %u SIN pulso: el anterior fue hace %lld ms", s_action_id, (t - s_last_onset_us) / 1000);
+        return;
+    }
     gpio_set_level(CONFIG_ARM_SYNC_GPIO, 1);
     gpio_set_level(CONFIG_ARM_LED_GPIO, 1);
-    int64_t t = esp_timer_get_time();
+    s_last_onset_us = t;
     esp_timer_start_once(s_sync_off, ARM_SYNC_PULSE_US);
     esp_timer_start_once(s_led_off, ACTIONS_LED_MS * 1000);
     uint8_t st = safety_state();
@@ -39,6 +45,38 @@ static void on_onset(void)
                      .label = s_label, .t_us = (uint32_t)t,
                      .level = st == ARM_SAFETY_SLOW ? ARM_LEVEL_MILD : ARM_LEVEL_NORMAL};
     safety_send_event(&e);
+    ESP_LOGI(TAG, "PULSO acción %u (etiqueta %u) t=%lld us", e.action_id, e.label, t);
+}
+
+bool actions_act(pose_t p, uint8_t label, const char **why)
+{
+    int64_t since = (esp_timer_get_time() - s_last_onset_us) / 1000;
+    if (since < ACTIONS_MIN_SPACING_MS) {
+        *why = "menos de 1.0 s desde el último pulso (el S3 lo marcaría OVERLAP)";
+        return false;
+    }
+    if (s_running) {
+        *why = "prueba onset en marcha";
+        return false;
+    }
+    pose_t c = motion_status().cmd;
+    if (c.b == p.b && c.s == p.s && c.e == p.e && c.h == p.h) {
+        *why = "el brazo ya está en ese destino (no habría movimiento ni pulso)";
+        return false;
+    }
+    s_action_id++;
+    s_label = label;
+    s_armed = true;
+    if (!motion_set_target(p, why)) {
+        s_armed = false;
+        return false;
+    }
+    return true;
+}
+
+void actions_disarm(void)
+{
+    s_armed = false;
 }
 
 static bool wait_idle(int timeout_ms)
@@ -133,6 +171,16 @@ void actions_led_test(void)
         vTaskDelay(pdMS_TO_TICKS(300));
     }
     safety_led_override(false);
+}
+
+void actions_sync_test(void)
+{
+    if (s_running || s_armed) { ESP_LOGE(TAG, "synctest: hay una acción en curso"); return; }
+    ESP_LOGW(TAG, "synctest: GPIO%d en ALTO 3 s (mide ~3.3 V contra GND), luego BAJO", CONFIG_ARM_SYNC_GPIO);
+    gpio_set_level(CONFIG_ARM_SYNC_GPIO, 1);
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    gpio_set_level(CONFIG_ARM_SYNC_GPIO, 0);
+    ESP_LOGW(TAG, "synctest: GPIO%d en BAJO (reposo)", CONFIG_ARM_SYNC_GPIO);
 }
 
 void actions_init(void)

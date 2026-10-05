@@ -22,9 +22,15 @@
 //   STATUS 1/s y en cuanto cambia el estado de seguridad. Heartbeat del supervisor (dashboard).
 // Cada extremo ignora los tipos que no conoce.
 //
-// Pulso de sync (regla dura 4): GPIO del supervisor -> pin de interrupción del S3, flanco de
-// subida en el instante en que el supervisor envía al brazo el primer paso de la acción,
-// ancho ARM_SYNC_PULSE_US. Masa común entre placas. Pines por fijar con C2 (ver abajo).
+// Pulso de sync (regla dura 4): GPIO del supervisor (ARM_SUP_SYNC_GPIO) -> pin de interrupción del S3.
+//   - Activo en ALTO: la línea está en BAJO en reposo y sube a 3.3 V durante ARM_SYNC_PULSE_US.
+//     El FLANCO DE SUBIDA es t = 0: el instante en que el supervisor envía al brazo el primer paso
+//     de la acción. El S3 configura interrupción por flanco de subida (con pull-down: antes de que
+//     arranque el supervisor la línea flota) y en la ISR solo toma esp_timer_get_time().
+//   - Separación mínima entre pulsos ARM_SYNC_MIN_SPACING_MS (el supervisor no emite pulsos más
+//     seguidos; el S3 marca OVERLAP por debajo de 1.0 s). En grabación (C4) >= 1.5 s.
+//   - Los movimientos que no son acciones (home, retomar tras pausa) no generan pulso.
+//   - Masa común entre placas. Pin del S3 lo fija C2.
 //
 // Niveles (el S3 decide el nivel; el supervisor aplica la reacción):
 //   0 normal    velocidad nominal
@@ -50,7 +56,8 @@
 #define ARM_HEARTBEAT_MS         100     // periodo de ALERT
 #define ARM_HEARTBEAT_TIMEOUT_MS 300     // 3 ALERT perdidos -> parada
 #define ARM_STATUS_PERIOD_MS     1000
-#define ARM_SYNC_PULSE_US        1000
+#define ARM_SYNC_PULSE_US        1000    // ancho del pulso (alto)
+#define ARM_SYNC_MIN_SPACING_MS  1000
 
 // Pines propuestos (supervisor = ESP32 DevKit clásico). Los del S3 los fija C2.
 #define ARM_SUP_UART_TX_GPIO     27      // -> RX del S3 (16/17 los usa el enlace con el brazo)
@@ -89,6 +96,7 @@ typedef struct __attribute__((packed)) {
 
 // Etiqueta de la acción (EVENT). Durante la recogida de datos (C4) algunas acciones son
 // errores deliberados; en operación normal todas son CORRECT.
+// LOG ONLY: el S3 solo la reenvía al dashboard y a los logs de grabación; nunca la usa para decidir el nivel.
 enum {
     ARM_LABEL_CORRECT   = 0,
     ARM_LABEL_ERROR     = 1,  // error deliberado (paradigma ErrP)
@@ -104,7 +112,7 @@ typedef struct __attribute__((packed)) {
     uint32_t seq;          // +1 por EVENT
     uint16_t action_id;    // índice de la acción en la secuencia del supervisor
     uint8_t  kind;         // ARM_EVENT_*
-    uint8_t  label;        // ARM_LABEL_*
+    uint8_t  label;        // ARM_LABEL_*  /* LOG ONLY */: el S3 nunca lo usa en la lógica de alertas
     uint32_t t_us;         // reloj del supervisor en el flanco del pulso (informativo)
     uint8_t  level;        // nivel aplicado en ese momento
 } arm_event_t;             // 13 B

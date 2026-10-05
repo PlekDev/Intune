@@ -6,8 +6,11 @@
 // Sin heartbeat del S3 nada se mueve: para probar sin S3, simularlo con "s3 <nivel>".
 //
 // Comandos (línea + Enter, 115200):
+//   act <b> <s> <e> <h> [etiqueta]  como go, pero es una ACCIÓN: pulso de sync (GPIO, alto ~1 ms) + EVENT al S3
+//                             en el primer paso. etiqueta 0 = correcta, 1 = error deliberado, 2 = sin etiquetar
 //   onset [n] [grados]        prueba de inicio: n acciones (20) de la base, LED + pulso en cada inicio
 //   onset stop                aborta la prueba
+//   synctest                  pin de sync en alto 3 s (comprobar con multímetro)
 //   led                       3 destellos del LED (¿tiene LED la placa?)
 //   s3 <0-3|off>              simula el S3 (ALERT cada 100 ms por el mismo parser); off = S3 muerto
 //   confirm                   = pulsación corta del botón: sale de la pausa (nivel 2) si nivel <= 1
@@ -174,6 +177,8 @@ static void handle_line(char *line)
         if (pin != CONFIG_ARM_LINK_RX_GPIO && pin != CONFIG_ARM_LINK_TX_GPIO) ESP_LOGE(TAG, "probe: solo GPIO%d o GPIO%d", CONFIG_ARM_LINK_RX_GPIO, CONFIG_ARM_LINK_TX_GPIO);
         else arm_uart_probe(pin);
 #endif
+    } else if (!strncmp(line, "synctest", 8)) {
+        actions_sync_test();
     } else if (!strncmp(line, "led", 3)) {
         actions_led_test();
     } else if (!strncmp(line, "s3 ", 3)) {
@@ -183,14 +188,23 @@ static void handle_line(char *line)
     } else if (!strncmp(line, "reset", 5)) {
         safety_reset();
     } else if (!strncmp(line, "home", 4)) {
+        actions_disarm();
         if (!motion_home(&why)) ESP_LOGE(TAG, "home rechazado: %s", why);
     } else if (!strncmp(line, "gob ", 4)) {
+        actions_disarm();
         motion_status_t m = motion_status();
         pose_t p = m.cmd;
         if (sscanf(line + 4, "%f", &p.b) != 1) { ESP_LOGE(TAG, "uso: gob <rad>"); return; }
         if (!motion_set_target(p, &why)) ESP_LOGE(TAG, "gob rechazado: %s", why);
         else ESP_LOGI(TAG, "destino base %+.3f", p.b);
+    } else if (!strncmp(line, "act ", 4)) {
+        pose_t p;
+        int label = ARM_LABEL_UNLABELED;
+        if (sscanf(line + 4, "%f %f %f %f %d", &p.b, &p.s, &p.e, &p.h, &label) < 4) { ESP_LOGE(TAG, "uso: act <b> <s> <e> <h> [etiqueta] (rad)"); return; }
+        if (!actions_act(p, (uint8_t)label, &why)) ESP_LOGE(TAG, "act rechazado: %s", why);
+        else ESP_LOGI(TAG, "acción: destino b=%+.3f s=%+.3f e=%+.3f h=%+.3f", p.b, p.s, p.e, p.h);
     } else if (!strncmp(line, "go ", 3)) {
+        actions_disarm();
         pose_t p;
         if (sscanf(line + 3, "%f %f %f %f", &p.b, &p.s, &p.e, &p.h) != 4) { ESP_LOGE(TAG, "uso: go <b> <s> <e> <h> (rad)"); return; }
         if (!motion_set_target(p, &why)) ESP_LOGE(TAG, "go rechazado: %s", why);
@@ -199,6 +213,7 @@ static void handle_line(char *line)
         motion_set_vmax(strtof(line + 4, NULL) / 57.2958f);
         ESP_LOGI(TAG, "vmax %.1f °/s", motion_status().vmax * 57.2958f);
     } else if (!strncmp(line, "stop", 4)) {
+        actions_disarm();
         motion_stop();
         ESP_LOGW(TAG, "STOP");
     } else if (!strncmp(line, "freeze", 6)) {
@@ -275,7 +290,7 @@ void app_main(void)
 #endif
 
     ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, 512, 0, 0, NULL, 0));
-    ESP_LOGI(TAG, "INTUNE supervisor, etapa 3 (niveles + heartbeat). Comandos: onset, led, s3, confirm, reset, home, go, gob, vel, stop, freeze, resume, json, scan, cmd, peer, status");
+    ESP_LOGI(TAG, "INTUNE supervisor, etapa 3 (niveles + heartbeat). Comandos: act, onset, led, s3, confirm, reset, home, go, gob, vel, stop, freeze, resume, json, scan, cmd, peer, status");
 
     motion_init(send_step);
     safety_init();
