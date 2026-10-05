@@ -22,8 +22,10 @@ static const pose_t LIM_MAX = { 1.6f,  0.9f, 2.6f, 3.2f};
 
 static bool (*s_send)(const char *json);
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
-static motion_status_t s = {.state = MOTION_UNKNOWN, .vmax = 0.35f};  // ~20 °/s
+static motion_status_t s = {.state = MOTION_UNKNOWN, .vmax = 0.35f, .speed_scale = 1.0f};  // ~20 °/s
 static int64_t s_home_until_us;
+static pose_t s_saved_target;   // destino guardado durante una pausa
+static void (*s_onset_cb)(void);
 
 const char *motion_state_name(motion_state_t st)
 {
@@ -101,7 +103,7 @@ static void motion_task(void *arg)
             if (same(s.cmd, s.target)) {
                 s.state = MOTION_IDLE;
             } else {
-                float step = s.vmax * MOTION_DT_MS / 1000.0f;
+                float step = s.vmax * s.speed_scale * MOTION_DT_MS / 1000.0f;
                 s.cmd.b = approach(s.cmd.b, s.target.b, step);
                 s.cmd.s = approach(s.cmd.s, s.target.s, step);
                 s.cmd.e = approach(s.cmd.e, s.target.e, step);
@@ -113,11 +115,12 @@ static void motion_task(void *arg)
             }
         }
         // Velocidad del servo con margen sobre vmax para que siga a los pasos sin quedarse atrás.
-        spd = (int)lroundf(s.vmax * STEPS_PER_RAD * 1.5f);
+        spd = (int)lroundf(s.vmax * s.speed_scale * STEPS_PER_RAD * 1.5f);
         if (spd < 30) spd = 30;
         now = s.state;
         portEXIT_CRITICAL(&s_mux);
 
+        if (send && prev == MOTION_IDLE && now == MOTION_MOVING && s_onset_cb) s_onset_cb();
         if (send) send_pose(p, spd, STEP_ACC);
         if (now != prev) ESP_LOGI(TAG, "%s -> %s", motion_state_name(prev), motion_state_name(now));
     }
@@ -129,22 +132,35 @@ void motion_init(bool (*send_json)(const char *json))
     xTaskCreate(motion_task, "motion", 4096, NULL, 10, NULL);
 }
 
-void motion_home(void)
+bool motion_home(const char **why)
 {
     pose_t p = POSE_INIT;
     portENTER_CRITICAL(&s_mux);
-    s.state = MOTION_HOMING;
-    s.cmd = s.target = p;
-    s.consec_fails = 0;
-    s_home_until_us = esp_timer_get_time() + (int64_t)HOME_MS * 1000;
+    bool held = s.held;
+    if (!held) {
+        s.state = MOTION_HOMING;
+        s.cmd = s.target = p;
+        s.consec_fails = 0;
+        s_home_until_us = esp_timer_get_time() + (int64_t)HOME_MS * 1000;
+    }
     portEXIT_CRITICAL(&s_mux);
+    if (held) {
+        *why = "retenido por seguridad (nivel >= 2 o sin S3)";
+        return false;
+    }
     ESP_LOGW(TAG, "home: movimiento lento a la postura inicial (%d pasos/s), %d ms", HOME_SPD, HOME_MS);
     send_pose(p, HOME_SPD, HOME_ACC);
+    return true;
 }
 
 bool motion_set_target(pose_t p, const char **why)
 {
-    motion_state_t st = motion_status().state;
+    motion_status_t ms = motion_status();
+    motion_state_t st = ms.state;
+    if (ms.held) {
+        *why = "retenido por seguridad (nivel >= 2 o sin S3)";
+        return false;
+    }
     if (st != MOTION_IDLE && st != MOTION_MOVING) {
         *why = st == MOTION_LINK_LOST ? "enlace perdido" : st == MOTION_HOMING ? "home en curso" : "posición desconocida: usa home";
         return false;
@@ -156,7 +172,7 @@ bool motion_set_target(pose_t p, const char **why)
     }
     bool ok = false;
     portENTER_CRITICAL(&s_mux);
-    if (s.state == MOTION_IDLE || s.state == MOTION_MOVING) {
+    if (!s.held && (s.state == MOTION_IDLE || s.state == MOTION_MOVING)) {
         s.target = p;
         ok = true;
     }
@@ -193,6 +209,35 @@ void motion_invalidate(void)
     portENTER_CRITICAL(&s_mux);
     s.state = MOTION_UNKNOWN;
     portEXIT_CRITICAL(&s_mux);
+}
+
+void motion_set_speed_scale(float k)
+{
+    if (k < 0.05f) k = 0.05f;
+    if (k > 1.0f) k = 1.0f;
+    portENTER_CRITICAL(&s_mux);
+    s.speed_scale = k;
+    portEXIT_CRITICAL(&s_mux);
+}
+
+void motion_hold(bool on, bool keep_target)
+{
+    portENTER_CRITICAL(&s_mux);
+    if (on) {
+        if (!s.held) s_saved_target = keep_target ? s.target : s.cmd;
+        else if (!keep_target) s_saved_target = s.cmd;
+        s.held = true;
+        s.target = s.cmd;          // el siguiente tick no avanza: el brazo queda en el último paso
+    } else if (s.held) {
+        s.held = false;
+        if (s.state == MOTION_IDLE || s.state == MOTION_MOVING) s.target = s_saved_target;
+    }
+    portEXIT_CRITICAL(&s_mux);
+}
+
+void motion_set_onset_cb(void (*cb)(void))
+{
+    s_onset_cb = cb;
 }
 
 motion_status_t motion_status(void)

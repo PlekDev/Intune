@@ -28,7 +28,9 @@ typedef enum {
 typedef struct {
     motion_state_t state;
     pose_t cmd, target;
-    float vmax;               // rad/s
+    float vmax;               // rad/s (nominal)
+    float speed_scale;        // 0..1, la fija la capa de seguridad (nivel 1)
+    bool held;                // retenido por la capa de seguridad (niveles 2/3, sin S3)
     bool frozen;
     uint32_t steps, acks, fails, consec_fails;
 } motion_status_t;
@@ -36,11 +38,19 @@ typedef struct {
 // send_json: envía un JSON al brazo; devuelve false si no pudo encolarlo.
 void motion_init(bool (*send_json)(const char *json));
 void motion_on_ack(bool ok);          // desde el callback de envío ESP-NOW
-void motion_home(void);
+bool motion_home(const char **why);
 bool motion_set_target(pose_t p, const char **why);
 void motion_stop(void);               // destino = posición actual ordenada
 void motion_set_vmax(float rad_s);
 void motion_freeze(bool on);          // prueba: deja de transmitir de golpe
 void motion_invalidate(void);         // alguien movió el brazo por fuera: hace falta home
+// Capa de seguridad (safety.c):
+void motion_set_speed_scale(float k);
+// on: frena (destino = posición actual) y rechaza destinos nuevos. keep_target: guarda el destino
+// para retomarlo al soltar (pausa de nivel 2); si no, se descarta (nivel 3, sin S3).
+void motion_hold(bool on, bool keep_target);
+// Se llama en la tarea de movimiento justo ANTES de enviar el primer paso de cada movimiento
+// (IDLE -> MOVING). Es el instante del pulso de sync (regla dura 4). No debe bloquear.
+void motion_set_onset_cb(void (*cb)(void));
 motion_status_t motion_status(void);
 const char *motion_state_name(motion_state_t s);
