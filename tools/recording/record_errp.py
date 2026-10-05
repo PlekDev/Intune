@@ -36,6 +36,7 @@ Salida: ml/data/raw/<fecha>_<sujeto>/
 """
 
 import argparse
+import collections
 import contextlib
 import csv
 import json
@@ -95,6 +96,7 @@ class Bridge(threading.Thread):
         self.w.writerow(["t", "counter", "flags"] + [f"f_{c}" for c in L.CH] + imu + [f"r_{c}" for c in L.CH])
         self.ws.writerow(["t", "state", "battery", "proc_us_max", "frames", "gaps", "lost", "reconnects", "crc_pc"])
         self.stop = False
+        self.recent = collections.deque(maxlen=int(L.FS * 240))  # (t, flags, f[8]) de los últimos 4 min
 
     def run(self):
         pending = None
@@ -108,6 +110,7 @@ class Bridge(threading.Thread):
                 pending = [f"{t:.4f}", p[0], p[1]] + [f"{v:.4f}" for v in p[2:10]] + imu
                 self.last_counter = p[0]
                 self.n += 1
+                self.recent.append((t, p[1], p[2:10]))
                 if p[1] & L.F_SETTLING:
                     self.settled_since = None
                 elif self.settled_since is None:
@@ -281,18 +284,29 @@ def run_blocks(br, wb):
         print(f"  {name}: listo (cnt {c0}..{c1})          ")
 
 
-def run_actions(a, br, arm, labels, we, rng):
-    n = len(labels)
-    stats = {"ok": 0, "no_pulse": 0, "no_t0": 0, "overlap": 0, "arm_err": 0}
-    last_seq = None
-    for i, err in enumerate(labels, 1):
-        if i > 1 and (i - 1) % a.rest_every == 0:
+def new_state(total):
+    return {"next_id": 1, "total": total, "last_seq": None,
+            "stats": {"ok": 0, "no_pulse": 0, "no_t0": 0, "overlap": 0, "arm_err": 0}}
+
+
+def run_actions(a, br, arm, items, we, rng, st, rest_every=0):
+    """items: lista de (etiqueta, err). Etiquetas: correct / error (dataset), familiar / check (sin
+    errores, fuera del dataset: build_dataset las deja con y = -1). Devuelve las estadísticas de ESTE
+    segmento; st acumula id de acción, seq de flancos y totales entre segmentos."""
+    n = st["total"]
+    stats = st["stats"]
+    seg = {k: 0 for k in stats}
+    last_seq = st["last_seq"]
+    for j, (seg_label, err) in enumerate(items):
+        i = st["next_id"]
+        st["next_id"] += 1
+        if rest_every and j > 0 and j % rest_every == 0:
             input(f"\nDescanso ({i - 1}/{n}). Enter para seguir... ")
         # vaciar eventos sueltos (rebotes, pulsos fuera de acción)
         while not br.events.empty():
             br.events.get_nowait()
         t_sent = time.time()
-        label = "manual" if arm is None else ("error" if err else "correct")
+        label = "manual" if arm is None else seg_label
         target, pose = "", None
         if arm is None:
             print(f"\nACCIÓN {i}/{n}: da un pulso en GPIO18 ahora", end="", flush=True)
@@ -331,6 +345,7 @@ def run_actions(a, br, arm, labels, we, rng):
         else:
             status = "ok"
         stats[status] += 1
+        seg[status] += 1
         seq, cnt, off, fl = evt[1] if evt else ("", "", "", "")
         if evt and last_seq is not None and seq != last_seq + 1:
             print(f"\n!! saltaron flancos: seq {last_seq} -> {seq}", file=sys.stderr)
@@ -349,7 +364,65 @@ def run_actions(a, br, arm, labels, we, rng):
         if wait > 0:
             time.sleep(wait)
     print()
-    return stats
+    st["last_seq"] = last_seq
+    return seg
+
+
+CHECK_FIELDS = ["block", "try", "passed", "t_start", "t_end", "pulses_ok", "n_actions", "lost", "loss_pct"] + \
+    [f"rstd_{c}" for c in L.CH]
+
+
+def check_quality(a, br, t0, t1, seg, n_act, lost0, block, attempt, wc):
+    """Calidad de las acciones de prueba: desviación robusta (1.4826 * MAD) del EEG filtrado por canal
+    (un parpadeo suelto no la mueve, un electrodo flojo sí), pulsos válidos y muestras perdidas."""
+    import numpy as np
+
+    rows = [(fl, f) for t, fl, f in list(br.recent) if t0 <= t <= t1 and not (fl & 0x07)]
+    if len(rows) < L.FS * 10:
+        print(f"  prueba: solo {len(rows)} muestras limpias; no se puede evaluar")
+        rstd = np.full(8, np.inf)
+    else:
+        x = np.array([f for _, f in rows])
+        rstd = 1.4826 * np.median(np.abs(x - np.median(x, axis=0)), axis=0)
+    lost = (br.last_status[5] - lost0) if br.last_status else 0
+    total = len(rows) + lost
+    loss_pct = 100.0 * lost / total if total else 100.0
+    key = [L.CH.index(c) for c in a.check_channels]
+    bad = [L.CH[i] for i in key if rstd[i] > a.check_max_uv]
+    warn_ch = [L.CH[i] for i in range(8) if i not in key and rstd[i] > a.check_max_uv]
+    passed = not bad and seg["ok"] >= n_act - 1 and loss_pct < 1.0
+    print("  ruido robusto (µV): " + "  ".join(f"{c}={v:.1f}{'!' if v > a.check_max_uv else ''}"
+                                               for c, v in zip(L.CH, rstd)))
+    print(f"  pulsos ok {seg['ok']}/{n_act}, pérdida {loss_pct:.2f} %  ->  {'BIEN' if passed else 'MAL'}"
+          + (f"  (canales clave malos: {', '.join(bad)})" if bad else "")
+          + (f"  (aviso, otros canales: {', '.join(warn_ch)})" if warn_ch else ""))
+    wc.writerow([block, attempt, int(passed), f"{t0:.3f}", f"{t1:.3f}", seg["ok"], n_act, lost, f"{loss_pct:.3f}"]
+                + [f"{v:.2f}" for v in rstd])
+    return passed
+
+
+def run_check(a, br, arm, we, rng, st, block, wc):
+    """Prueba de calidad antes de un bloque del dataset; se repite si sale mal."""
+    for attempt in range(1, a.check_max_tries + 1):
+        print(f"\n--- prueba de señal antes del bloque {block} (intento {attempt}): {a.check_n} acciones sin errores")
+        lost0 = br.last_status[5] if br.last_status else 0
+        t0 = time.time()
+        seg = run_actions(a, br, arm, [("check", 0)] * a.check_n, we, rng, st)
+        time.sleep(1.0)  # que entren las muestras de la última época
+        if check_quality(a, br, t0, time.time(), seg, a.check_n, lost0, block, attempt, wc):
+            return True
+        if attempt < a.check_max_tries:
+            try:
+                ans = input("  Señal insuficiente: acomoda la diadema / pon gel en los canales marcados.\n"
+                            "  Enter = repetir la prueba, c = seguir igual, q = terminar: ").strip().lower()
+            except EOFError:  # sin teclado (stdin cerrado): seguir
+                ans = "c"
+            if ans == "c":
+                return False
+            if ans == "q":
+                raise KeyboardInterrupt
+    print(f"  {a.check_max_tries} intentos sin pasar: se sigue igual (queda anotado en checks.csv)")
+    return False
 
 
 def main():
@@ -366,7 +439,17 @@ def main():
     ap.add_argument("--p-error", type=float, default=0.22)
     ap.add_argument("--isi", type=float, nargs=2, default=(3.0, 4.0), metavar=("MIN", "MAX"),
                     help="s entre inicios de acción (>= 1.5 s y >= duración de la acción)")
-    ap.add_argument("--rest-every", type=int, default=50)
+    ap.add_argument("--rest-every", type=int, default=50, help="descanso cada N acciones (sin --check-every)")
+    ap.add_argument("--familiar", type=int, default=0, metavar="N",
+                    help="N acciones sin errores al inicio para memorizar el recorrido (label familiar)")
+    ap.add_argument("--familiar-pause", type=float, default=30.0, help="s de pausa tras la familiarización")
+    ap.add_argument("--check-every", type=int, default=0, metavar="N",
+                    help="prueba de señal antes de cada bloque de N acciones del dataset (0 = no)")
+    ap.add_argument("--check-n", type=int, default=20, help="acciones de cada prueba (label check)")
+    ap.add_argument("--check-max-uv", type=float, default=20.0, help="ruido robusto máximo por canal clave (µV)")
+    ap.add_argument("--check-channels", default="Fz,Cz,C3,C4,Pz", type=lambda v: v.split(","),
+                    help="canales que deben pasar la prueba")
+    ap.add_argument("--check-max-tries", type=int, default=3)
     ap.add_argument("--pulse-timeout", type=float, default=3.0, help="s para recibir el flanco")
     ap.add_argument("--action-timeout", type=float, default=10.0,
                     help="s tras el flanco para DONE (el regreso tras un error puede durar ~5 s)")
@@ -375,6 +458,9 @@ def main():
     ap.add_argument("--out", default=str(ROOT / "ml" / "data" / "raw"))
     ap.add_argument("--notes", default="")
     a = ap.parse_args()
+    bad_ch = [c for c in a.check_channels if c not in L.CH]
+    if bad_ch:
+        sys.exit(f"--check-channels: canales desconocidos {bad_ch}; válidos {L.CH}")
     if a.isi[0] < 1.5:
         sys.exit("--isi mínimo 1.5 s (CLAUDE.md)")
     if not a.no_arm and not a.arm_port:
@@ -392,6 +478,8 @@ def main():
     meta = {
         "subject": a.subject, "start": time.strftime("%Y-%m-%dT%H:%M:%S"), "seed": seed,
         "n_actions": a.n_actions, "p_error": a.p_error, "isi_s": list(a.isi), "no_arm": a.no_arm,
+        "familiar": a.familiar, "check_every": a.check_every, "check_n": a.check_n,
+        "check_max_uv": a.check_max_uv, "check_channels": a.check_channels,
         "paradigm": None if a.no_arm else {
             "version": 2,
             "rule": "correcta = siguiente postura del anillo (o la saltada por el error anterior); "
@@ -428,7 +516,28 @@ def main():
             we.writerow(["action_id", "label", "t_sent", "t_onset_arm", "t_done_arm",
                          "evt_seq", "evt_counter", "evt_offset_us", "evt_flags", "status", "arm_msg",
                          "target", "pose_deg"])
-            stats = run_actions(a, br, arm, labels, we, rng)
+            n_extra = a.familiar + (a.check_n * -(-a.n_actions // a.check_every) if a.check_every else 0)
+            st = new_state(a.n_actions + n_extra)
+            stats = st["stats"]
+            if a.familiar:
+                print(f"\n--- familiarización: {a.familiar} acciones sin errores (memoriza el recorrido)")
+                run_actions(a, br, arm, [("familiar", 0)] * a.familiar, we, rng, st)
+                print(f"--- pausa de {a.familiar_pause:.0f} s")
+                time.sleep(a.familiar_pause)
+            items = [("error" if e else "correct", e) for e in labels]
+            if a.check_every:
+                with open(outdir / "checks.csv", "w", newline="") as fc:
+                    wc = csv.writer(fc)
+                    wc.writerow(CHECK_FIELDS)
+                    for b0 in range(0, a.n_actions, a.check_every):
+                        block = b0 // a.check_every + 1
+                        run_check(a, br, arm, we, rng, st, block, wc)
+                        fc.flush()
+                        print(f"\n--- bloque {block}: acciones {b0 + 1}-{min(b0 + a.check_every, a.n_actions)} del dataset")
+                        run_actions(a, br, arm, items[b0:b0 + a.check_every], we, rng, st)
+                        fe.flush()
+            else:
+                run_actions(a, br, arm, items, we, rng, st, rest_every=a.rest_every)
     except KeyboardInterrupt:
         print("\nInterrumpido; se guarda lo grabado.")
     finally:
