@@ -6,23 +6,28 @@
 
 BR41N.IO Hackathon project (IEEE SMC 2026, Programming category: "Your Hacking Project").
 
-A fully embedded pipeline (no PC, no g.tec dongle) that monitors an operator's EEG while they work with a robotic arm. It sends **graded alerts** to the arm so it can react to the operator's state, for example slowing down on a mild alert or stopping on a severe one. The target is industrial use, but the design is general purpose: any setting where a person operates or supervises a robotic arm.
+A fully embedded pipeline (no PC, no g.tec dongle) that monitors an operator's EEG while they work with a robotic arm. It detects **error-related potentials (ErrPs)**, the brain response that appears when the operator sees the arm do something wrong, and sends **graded alerts** to the arm so it can react, for example slowing down on a mild alert or stopping on a severe one. The target is industrial use, but the design is general purpose: any setting where a person operates or supervises a robotic arm.
 
 > Hackathon prototype. Not a certified safety system.
 
 ## Architecture
 
 ```
-Unicorn Hybrid Black ──BT Classic SPP──> classic ESP32 ──UART 921600──> ESP32-S3 ─────UART─────> arm ESP32
-   8 EEG ch @ 250 Hz                     receives, validates,           autoencoder,              applies the reaction
-                                         filters with CLEEGN            graded alerts             (slow down, pause, stop)
+Unicorn Hybrid Black ──BT Classic SPP──> classic ESP32 ──UART 921600──> ESP32-S3 <────UART─────> arm ESP32
+   8 EEG ch @ 250 Hz                     receives, validates,           ErrP detection   <──GPIO── applies the reaction
+                                         causal IIR 1–15 Hz             (autoencoder),   sync     (slow down, pause, stop),
+                                                                        graded alerts    pulse    sends event metadata
 ```
 
 | Node | Role |
 |---|---|
-| **Classic ESP32** | Connects to the g.tec Unicorn Hybrid Black over Bluetooth Classic (the S3 has BLE only). Parses and validates frames, cleans the EEG with **CLEEGN** (a CNN for EEG reconstruction) and streams it to the S3. |
-| **ESP32-S3** | Runs an **autoencoder** on the filtered EEG and turns its output into an alert level. |
-| **Arm ESP32** | Controls the robotic arm. Receives alerts from the S3 over UART and applies the matching reaction. |
+| **Classic ESP32** | Connects to the g.tec Unicorn Hybrid Black over Bluetooth Classic (the S3 has BLE only). Parses and validates frames, filters the EEG with a causal **1–15 Hz IIR band-pass** per channel and streams it to the S3. |
+| **ESP32-S3** | Cuts the filtered EEG into epochs time-locked to each arm action, detects ErrPs with an **autoencoder** and turns the result into an alert level. |
+| **Arm ESP32** | Controls the robotic arm. Fires a GPIO sync pulse to the S3 at the onset of each action (plus its metadata over UART), receives alerts over UART and applies the matching reaction. |
+
+### Why ErrPs
+
+When a person sees a machine make a mistake, the EEG shows an error-related potential: a fronto-central negativity about 200–300 ms after the event, followed by a positivity. The Unicorn's Fz and Cz electrodes sit right where it is strongest. Detecting it lets the arm react to the operator noticing a problem, sometimes before they press any button.
 
 ### Alert levels (draft)
 
@@ -42,8 +47,9 @@ The system is fail-safe: if the arm loses the heartbeat from the S3, or the S3 l
 | PC ↔ Unicorn over RFCOMM (protocol verified) | ✅ 0 % loss at 250 Hz |
 | ESP32 ↔ Unicorn: discovery, connection, start/ACK | ✅ |
 | Frame validation on the ESP32 | ✅ 11,330 consecutive frames, 0 gaps |
-| 10-minute integrity test, signal check | ⏳ |
-| CLEEGN on the classic ESP32 | ⏳ |
+| 10-minute integrity test on the ESP32 | ✅ 0.001 % loss (2 of 176,197 samples, 1 gap), 0 corrupt frames, 0 reconnections in 11.5 min |
+| Signal check (alpha with eyes closed, jaw artifact) | ⏳ |
+| IIR filter + gap handling on the classic ESP32 | ⏳ |
 | UART link ESP32 → S3 | ⏳ |
 | Autoencoder on the S3 | ⏳ |
 | UART link S3 → arm, arm controller | ⏳ |
@@ -57,10 +63,10 @@ Findings so far:
 ```
 tools/linux_probe/unicorn_probe.py   # PC tool: connect to the Unicorn, parse, measure loss, CSV export
 firmware/common/                     # Shared headers (Unicorn protocol + parser, inter-node protocols)
-firmware/bridge_esp32/               # Classic ESP32: BT acquisition + CLEEGN (PlatformIO, ESP-IDF)
+firmware/bridge_esp32/               # Classic ESP32: BT acquisition + IIR filter (PlatformIO, ESP-IDF)
 firmware/detector_s3/                # ESP32-S3: autoencoder + alerts
 firmware/arm_esp32/                  # Arm controller: UART from the S3 + reactions
-ml/                                  # Training and export of CLEEGN and the autoencoder
+ml/                                  # Autoencoder training and data
 ```
 
 ## Getting started
@@ -118,5 +124,4 @@ Bluetooth SPP, start `61 7C 87`, stop `63 5C C5` (both answered with `00 00 00`)
 
 Channels: Fz, C3, Cz, C4, Pz, PO7, Oz, PO8. See `firmware/common/unicorn_protocol.h` for offsets and scaling.
 
-References: Robert Oostenveld's `unicorn2lsl`, the Rust crate `gtec`, and g.tec's `UnicornBluetoothProtocol.pdf` ([unicorn-bi/Unicorn-Suite-Hybrid-Black](https://github.com/unicorn-bi/Unicorn-Suite-Hybrid-Black)). CLEEGN: Lai et al., *CLEEGN: A Convolutional Neural Network for Plug-and-Play Automatic EEG Reconstruction*.
->>>>>>> 4c8cd00 (ESP and Unicorn)
+References: Robert Oostenveld's `unicorn2lsl`, the Rust crate `gtec`, and g.tec's `UnicornBluetoothProtocol.pdf` ([unicorn-bi/Unicorn-Suite-Hybrid-Black](https://github.com/unicorn-bi/Unicorn-Suite-Hybrid-Black)).
