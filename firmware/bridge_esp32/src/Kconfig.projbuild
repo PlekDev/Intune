@@ -50,6 +50,14 @@ config BRIDGE_BUTTON_GPIO
     int "GPIO botón stop/reanudar, activo bajo (-1 = sin botón)"
     default 0
 
+config BRIDGE_SYNC_GPIO
+    int "GPIO entrada del pulso de sincronía del brazo (-1 = no usado)"
+    default 18
+    help
+        Flanco de subida = inicio de una acción del brazo (regla dura 4). El puente lo
+        convierte en número de muestra Unicorn y envía una trama EVENT. Pull-down interno:
+        sin cable queda en bajo. Requiere tierra común con el ESP32 del brazo. 3.3 V máx.
+
 config BRIDGE_STATS_PERIOD_S
     int "Periodo de stats por log (s)"
     default 5

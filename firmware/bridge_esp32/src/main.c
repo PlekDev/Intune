@@ -113,6 +113,69 @@ static uint32_t s_proc_us_max;             // máximo del segundo en curso
 static volatile uint32_t s_proc_us_last;   // máximo del último segundo (STATUS y stats)
 static volatile uint32_t s_held, s_filter_resets, s_link_frames;
 
+// Pulso de sincronía: t0 = envolvente inferior de (t_llegada - contador*4 ms), mínimo
+// de los últimos T0_BLOCKS bloques de T0_BLOCK_LEN muestras (sigue la deriva de reloj).
+#define T0_BLOCK_LEN   500  // 2 s
+#define T0_BLOCKS      5    // ventana de 10 s
+#define T0_MIN_SAMPLES 250  // 1 s de datos antes de dar t0 por válido
+#define SYNC_DEBOUNCE_US 20000
+#define SYNC_OVERLAP_US  1000000
+static QueueHandle_t s_sync_q;             // ISR -> proc_task: int64 t_flanco (us)
+static int64_t s_t0_blk[T0_BLOCKS];
+static int s_t0_blk_idx, s_t0_blk_fill;
+static uint32_t s_t0_samples;
+static volatile uint32_t s_events;
+
+static void t0_reset(void)
+{
+    for (int i = 0; i < T0_BLOCKS; i++) {
+        s_t0_blk[i] = INT64_MAX;
+    }
+    s_t0_blk_idx = s_t0_blk_fill = 0;
+    s_t0_samples = 0;
+}
+
+static void t0_update(int64_t t_arr, uint32_t counter)
+{
+    int64_t c = t_arr - (int64_t)counter * 4000;
+    if (c < s_t0_blk[s_t0_blk_idx]) {
+        s_t0_blk[s_t0_blk_idx] = c;
+    }
+    s_t0_samples++;
+    if (++s_t0_blk_fill >= T0_BLOCK_LEN) {
+        s_t0_blk_fill = 0;
+        s_t0_blk_idx = (s_t0_blk_idx + 1) % T0_BLOCKS;
+        s_t0_blk[s_t0_blk_idx] = INT64_MAX;
+    }
+}
+
+static bool t0_get(int64_t *t0)
+{
+    if (s_t0_samples < T0_MIN_SAMPLES) {
+        return false;
+    }
+    int64_t m = INT64_MAX;
+    for (int i = 0; i < T0_BLOCKS; i++) {
+        if (s_t0_blk[i] < m) {
+            m = s_t0_blk[i];
+        }
+    }
+    *t0 = m;
+    return true;
+}
+
+#if CONFIG_BRIDGE_SYNC_GPIO >= 0
+static void IRAM_ATTR sync_isr(void *arg)
+{
+    int64_t t = esp_timer_get_time(); // nada más: el resto en proc_task
+    BaseType_t hp = pdFALSE;
+    xQueueSendFromISR(s_sync_q, &t, &hp);
+    if (hp) {
+        portYIELD_FROM_ISR();
+    }
+}
+#endif
+
 static void link_write(const uint8_t *f, size_t n)
 {
     uart_write_bytes(BRIDGE_UART, f, n);
@@ -163,7 +226,7 @@ static void filters_reset(const float uv[UNICORN_N_EEG])
 
 static void on_frame(const uint8_t *f, uint32_t gap, void *ctx)
 {
-    int64_t t0 = esp_timer_get_time();
+    int64_t t_arr = esp_timer_get_time(); // llegada (aprox.) para t0; también mide el proceso
     unicorn_decode(f, &s_last_sample);
     const unicorn_sample_t *m = &s_last_sample;
     uint8_t flags = 0;
@@ -203,6 +266,10 @@ static void on_frame(const uint8_t *f, uint32_t gap, void *ctx)
     }
     emit_sample(m->counter, m->eeg_uv, imu, flags);
     memcpy(s_hold_uv, m->eeg_uv, sizeof(s_hold_uv));
+    if (flags & LINK_F_SESSION_START) {
+        t0_reset(); // el contador volvió a 1: t0 cambia por completo
+    }
+    t0_update(t_arr, m->counter);
     memcpy(s_hold_imu, imu, sizeof(s_hold_imu));
 
     if (s_parser_dump_next) {
@@ -214,7 +281,7 @@ static void on_frame(const uint8_t *f, uint32_t gap, void *ctx)
                  m->gyr_dps[0], m->gyr_dps[1], m->gyr_dps[2]);
     }
 
-    uint32_t dt = (uint32_t)(esp_timer_get_time() - t0);
+    uint32_t dt = (uint32_t)(esp_timer_get_time() - t_arr);
     if (dt > s_proc_us_max) {
         s_proc_us_max = dt;
     }
@@ -429,13 +496,41 @@ static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
 
 // ---------------- Tareas ----------------
 
+static void handle_edge(int64_t te)
+{
+    static int64_t last_edge = INT64_MIN / 2;
+    static uint32_t seq;
+    if (te - last_edge < SYNC_DEBOUNCE_US) {
+        return; // rebote del flanco
+    }
+    link_event_t e = {.seq = ++seq};
+    if (te - last_edge < SYNC_OVERLAP_US) {
+        e.flags |= LINK_EVT_F_OVERLAP;
+    }
+    last_edge = te;
+    int64_t t0;
+    if (s_state == ST_STREAMING && t0_get(&t0) && te > t0) {
+        int64_t d = te - t0;
+        int64_t k = (d + 2000) / 4000;
+        e.counter = (uint32_t)k;
+        e.offset_us = (int16_t)(d - k * 4000);
+    } else {
+        e.flags |= LINK_EVT_F_NO_T0;
+    }
+    uint8_t f[LINK_MAX_FRAME];
+    link_write(f, link_encode_event(f, &e));
+    s_events++;
+    ESP_LOGI(TAG, "[sync] flanco %" PRIu32 " -> cnt=%" PRIu32 " off=%d us flags=%02x", e.seq, e.counter,
+             e.offset_us, e.flags);
+}
+
 // Core 1: stream buffer -> parser -> huecos + IIR -> UART. STATUS cada segundo.
 static void proc_task(void *arg)
 {
     static uint8_t buf[UART_CHUNK];
     int64_t next_status = esp_timer_get_time();
     for (;;) {
-        size_t n = xStreamBufferReceive(s_sb, buf, sizeof(buf), pdMS_TO_TICKS(100));
+        size_t n = xStreamBufferReceive(s_sb, buf, sizeof(buf), pdMS_TO_TICKS(20));
         if (s_parser_new_session) {
             s_parser_new_session = false;
             unicorn_parser_new_session(&s_parser);
@@ -443,6 +538,10 @@ static void proc_task(void *arg)
         }
         if (n > 0) {
             unicorn_parser_feed(&s_parser, buf, n, on_frame, NULL);
+        }
+        int64_t te;
+        while (xQueueReceive(s_sync_q, &te, 0) == pdTRUE) {
+            handle_edge(te);
         }
         int64_t now = esp_timer_get_time();
         if (now >= next_status) {
@@ -705,8 +804,8 @@ static void ctrl_task(void *arg)
                 s_parser_dump_next = true; // una trama decodificada por periodo
             }
             ESP_LOGI(TAG, "[iir] link=%" PRIu32 " retenidas(ZOH)=%" PRIu32 " reinicios_filtro=%" PRIu32
-                     " proc_max=%" PRIu32 " us/muestra%s",
-                     s_link_frames, s_held, s_filter_resets, s_proc_us_last, FILTER_NOTE);
+                     " proc_max=%" PRIu32 " us/muestra eventos=%" PRIu32 "%s",
+                     s_link_frames, s_held, s_filter_resets, s_proc_us_last, s_events, FILTER_NOTE);
             last_rx = rx;
             last_stats = now;
         }
@@ -728,6 +827,14 @@ static void init_gpio_uart(void)
     gpio_config_t in = {.pin_bit_mask = 1ULL << CONFIG_BRIDGE_BUTTON_GPIO, .mode = GPIO_MODE_INPUT,
                         .pull_up_en = GPIO_PULLUP_ENABLE};
     ESP_ERROR_CHECK(gpio_config(&in));
+#endif
+
+#if CONFIG_BRIDGE_SYNC_GPIO >= 0
+    gpio_config_t sync = {.pin_bit_mask = 1ULL << CONFIG_BRIDGE_SYNC_GPIO, .mode = GPIO_MODE_INPUT,
+                          .pull_down_en = GPIO_PULLDOWN_ENABLE, .intr_type = GPIO_INTR_POSEDGE};
+    ESP_ERROR_CHECK(gpio_config(&sync));
+    ESP_ERROR_CHECK(gpio_install_isr_service(0));
+    ESP_ERROR_CHECK(gpio_isr_handler_add(CONFIG_BRIDGE_SYNC_GPIO, sync_isr, NULL));
 #endif
 
     uart_config_t uc = {
@@ -820,6 +927,8 @@ void app_main(void)
     unicorn_parser_init(&s_parser);
     s_evq = xQueueCreate(16, sizeof(bridge_ev_t));
     s_sb = xStreamBufferCreate(SB_SIZE, 1);
+    s_sync_q = xQueueCreate(8, sizeof(int64_t));
+    t0_reset();
 
     init_bt();
     init_gpio_uart(); // después de init_bt: con espejo en consola, los logs se apagan aquí

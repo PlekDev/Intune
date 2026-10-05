@@ -48,7 +48,7 @@ The system is fail-safe: if the arm loses the heartbeat from the S3, or the S3 l
 | ESP32 ↔ Unicorn: discovery, connection, start/ACK | ✅ |
 | Frame validation on the ESP32 | ✅ 11,330 consecutive frames, 0 gaps |
 | 10-minute integrity test on the ESP32 | ✅ 0.001 % loss (2 of 176,197 samples, 1 gap), 0 corrupt frames, 0 reconnections in 11.5 min |
-| Signal check (alpha with eyes closed, jaw artifact) | ⏳ |
+| Signal check (alpha with eyes closed, jaw artifact) | ✅ Through the ESP32 with the 1–15 Hz IIR (`link_view.py live`): alpha peak with eyes closed, large jaw-clench artifact, clean Fz/Cz |
 | IIR filter + gap handling on the classic ESP32 | ⏳ |
 | UART link ESP32 → S3 | ⏳ |
 | Autoencoder on the S3 | ⏳ |
